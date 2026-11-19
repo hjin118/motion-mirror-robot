@@ -1,0 +1,1962 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>모션 미러 로봇</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+  /* Layout: full-screen 3D sim viewport, camera picture-in-picture bottom-left, control dock along the bottom edge */
+  :root {
+    --bg: #0e1418;
+    --panel: rgba(20, 29, 35, 0.86);
+    --line: #2a3a44;
+    --fg: #e4ecef;
+    --muted: #8ea1aa;
+    --accent: #f2a541;     /* robot joint amber */
+    --track: #4fd1c5;      /* tracking teal */
+    --warn: #ef6f6c;
+    --font-body: "IBM Plex Sans KR", system-ui, -apple-system, "Malgun Gothic", sans-serif;
+    --font-ui: "Space Grotesk", "IBM Plex Sans KR", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 var(--font-body);
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+  header {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: calc(env(safe-area-inset-top, 0px) + 12px) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
+    pointer-events: none;
+  }
+  h1 {
+    margin: 0; font: 600 17px/1.2 var(--font-ui); letter-spacing: 0.02em;
+  }
+  h1 small { display: block; font: 500 11px/1.4 var(--font-ui); color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+  .status {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--line);
+    font: 500 12px/1 var(--font-ui); font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .status::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted);
+  }
+  .status[data-state="track"]::before { background: var(--track); box-shadow: 0 0 8px var(--track); }
+  .status[data-state="busy"]::before { background: var(--accent); }
+  .status[data-state="lost"]::before, .status[data-state="error"]::before { background: var(--warn); }
+
+  #pip {
+    position: fixed;
+    left: max(16px, env(safe-area-inset-left, 0px));
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 84px);
+    width: min(34vw, 240px); aspect-ratio: 3 / 4;
+    border-radius: 10px; overflow: hidden;
+    background: #070b0d; border: 1px solid var(--line);
+  }
+  @media (min-aspect-ratio: 1/1) { #pip { aspect-ratio: 4 / 3; width: min(28vw, 300px); } }
+  #pip .mirror { position: absolute; inset: 0; }
+  #pip.mirrored .mirror { transform: scaleX(-1); }
+  #pip video, #pip canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #pip .empty {
+    position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+    padding: 12px; color: var(--muted); font-size: 12px;
+  }
+
+  #dock {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 12px max(16px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 12px) max(16px, env(safe-area-inset-left, 0px));
+    background: linear-gradient(to top, var(--bg) 40%, transparent);
+  }
+  button, select, .linkbtn {
+    font: 500 13px/1 var(--font-body); color: var(--fg);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 0 14px; height: 40px; cursor: pointer;
+  }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }
+  button[aria-pressed="true"] { border-color: var(--track); color: var(--track); }
+  #btnStart { background: var(--accent); color: #1b1206; border-color: var(--accent); font-weight: 600; min-width: 108px; }
+  #btnStart.stop { background: var(--panel); color: var(--fg); border-color: var(--line); }
+  .linkbtn { display: inline-flex; align-items: center; text-decoration: none; }
+  .linkbtn:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }
+  .spacer { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; }
+  @media (max-width: 520px) { .hint { display: none; } }
+
+  #msg {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    max-width: min(420px, calc(100vw - 32px));
+    padding: 16px 18px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--warn);
+    line-height: 1.6;
+  }
+  #msg b { color: var(--warn); }
+
+  /* control sheets that open above the dock */
+  .sheet {
+    position: fixed; z-index: 5;
+    right: max(16px, env(safe-area-inset-right, 0px));
+    bottom: calc(var(--dock-h, 72px) + 8px);
+    width: min(360px, calc(100vw - 32px));
+    max-height: calc(100% - var(--dock-h, 72px) - 140px); overflow-y: auto;
+    padding: 16px; border-radius: 12px;
+    background: rgba(20, 29, 35, 0.96); border: 1px solid var(--line);
+    display: grid; gap: 12px;
+  }
+  .sheet h2 { margin: 0; font: 600 15px/1.3 var(--font-ui); }
+  .toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .toggles button { height: auto; min-height: 58px; padding: 10px 12px; display: grid; gap: 2px; text-align: left; }
+  .toggles b { font-weight: 600; font-size: 13px; }
+  .toggles small { color: var(--muted); font-size: 11px; line-height: 1.35; }
+  .toggles button[aria-pressed="true"] small { color: var(--fg); opacity: 0.75; }
+  .field { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
+  .field select { width: 100%; }
+  .sheet .row { display: flex; gap: 8px; }
+  .sheet .row button { flex: 1; }
+  .empty-note { margin: 0; color: var(--muted); font-size: 13px; }
+  #clipList { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  #clipList li {
+    display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+    padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: #10181d;
+  }
+  #clipList li.playing { border-color: var(--track); }
+  #clipList .info { min-width: 0; display: grid; gap: 2px; }
+  #clipList .info b { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #clipList .info small { color: var(--muted); font: 500 11px/1.3 var(--font-ui); font-variant-numeric: tabular-nums; }
+  #clipList .acts { display: flex; gap: 6px; }
+  #clipList .acts button { height: 34px; padding: 0 10px; font-size: 12px; }
+  #clipList .acts .play { border-color: var(--track); color: var(--track); }
+  @media (max-width: 440px) { #clipList li { grid-template-columns: 1fr; } }
+  .count {
+    display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; margin-left: 4px;
+    border-radius: 999px; background: var(--line); font: 600 11px/1 var(--font-ui);
+  }
+  button[aria-expanded="true"] { border-color: var(--track); color: var(--track); }
+
+  #btnRec { display: inline-flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+  .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); }
+  #btnRec.recording { border-color: var(--warn); color: var(--warn); }
+  #btnRec.recording .rec-dot { border-radius: 2px; animation: guidePulse 1s ease-in-out infinite; }
+
+  #player {
+    position: fixed; z-index: 4; left: 50%; transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top, 0px) + 116px);
+    width: min(560px, calc(100vw - 32px));
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--track);
+  }
+  #player .track { flex: 1; min-width: 0; display: grid; gap: 4px; }
+  #player .meta { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+  #player .meta b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #player .meta span { color: var(--muted); font: 500 12px/1.4 var(--font-ui); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #player input[type="range"] { width: 100%; accent-color: var(--track); margin: 0; }
+  #player button { height: 36px; padding: 0 10px; flex: none; }
+  #btnPlay { width: 40px; color: var(--track); border-color: var(--track); }
+
+  #exporter {
+    position: fixed; z-index: 6; left: 50%; transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top, 0px) + 116px);
+    width: min(400px, calc(100vw - 32px));
+    max-height: calc(100% - env(safe-area-inset-top, 0px) - 116px - var(--dock-h, 72px) - 16px); overflow-y: auto;
+    display: grid; gap: 10px;
+    padding: 14px 16px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--accent);
+  }
+  #exporter h2 { margin: 0; font: 600 15px/1.3 var(--font-ui); display: flex; align-items: center; gap: 8px; }
+  #exporter h2 .rec-dot { animation: guidePulse 1s ease-in-out infinite; }
+  #exporter p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  #exporter .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  #exporter .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s linear; }
+  #expPreview { width: 100%; max-height: 38vh; border-radius: 8px; background: #000; }
+  #exporter .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  #exporter .row button { flex: 1; white-space: nowrap; }
+  #expSave, #expShare { border-color: var(--accent); color: var(--accent); }
+  #clipList .acts .video { border-color: var(--accent); color: var(--accent); }
+
+  #guide {
+    position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 116px); transform: translateX(-50%);
+    width: min(440px, calc(100vw - 32px));
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 16px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--warn);
+    color: var(--fg);
+  }
+  #guide svg { flex: none; color: var(--warn); animation: guidePulse 1.6s ease-in-out infinite; }
+  #guide div { display: grid; gap: 3px; min-width: 0; }
+  #guide strong { font: 600 16px/1.3 var(--font-body); color: var(--warn); }
+  #guide span { font-size: 13px; line-height: 1.5; }
+  #guide em { font-style: normal; font-size: 11px; color: var(--muted); }
+  @keyframes guidePulse { 50% { opacity: 0.45; } }
+  @media (prefers-reduced-motion: reduce) { #guide svg { animation: none; } }
+
+  #robots {
+    position: fixed; left: 0; right: 0; top: calc(env(safe-area-inset-top, 0px) + 58px);
+    display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none;
+    padding: 4px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px));
+  }
+  #robots::-webkit-scrollbar { display: none; }
+  .robot-chip {
+    flex: none; display: flex; align-items: center; gap: 8px;
+    height: 44px; padding: 0 14px 0 8px; border-radius: 999px; text-align: left;
+  }
+  .robot-chip .dot {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: var(--swatch); box-shadow: inset 0 -4px 0 rgba(0, 0, 0, 0.25);
+  }
+  .robot-chip .label { display: grid; line-height: 1.2; }
+  .robot-chip .label b { font: 600 13px/1.2 var(--font-body); }
+  .robot-chip .label small { font-size: 11px; color: var(--muted); }
+  .robot-chip[aria-pressed="true"] { border-color: var(--accent); color: var(--fg); background: rgba(242, 165, 65, 0.14); }
+  @media (max-width: 520px) { .robot-chip .label small { display: none; } }
+
+  #connect {
+    position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); top: calc(env(safe-area-inset-top, 0px) + 116px);
+    width: min(300px, calc(100vw - 32px));
+    padding: 18px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--line);
+    display: grid; gap: 12px; justify-items: center; text-align: center;
+  }
+  #connect h2 { margin: 0; font: 600 15px/1.3 var(--font-ui); }
+  #connect p { margin: 0; color: var(--muted); font-size: 12px; }
+  #qr { background: #fff; padding: 10px; border-radius: 8px; line-height: 0; }
+  #qr img, #qr canvas { width: 200px; height: 200px; }
+  #connectUrl {
+    width: 100%; padding: 8px 10px; border-radius: 6px;
+    background: #0a0f12; border: 1px solid var(--line);
+    font: 500 12px/1.4 var(--font-ui); word-break: break-all; user-select: all;
+  }
+  #connect .row { display: flex; gap: 8px; width: 100%; }
+  #connect .row button { flex: 1; }
+  #btnPhone { border-color: var(--track); color: var(--track); }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <header>
+    <h1><small>Pose → Humanoid</small>모션 미러 로봇</h1>
+    <span class="status" id="status" data-state="idle">대기 중</span>
+  </header>
+
+  <nav id="robots" aria-label="로봇 선택"></nav>
+
+  <div id="pip" class="mirrored">
+    <div class="mirror">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="empty" id="pipEmpty">시작을 누르면<br>카메라 화면이 여기에 나옵니다</div>
+  </div>
+
+  <div id="dock">
+    <button id="btnStart" type="button">시작</button>
+    <button id="btnRec" type="button" title="동작 녹화"><span class="rec-dot"></span><span id="recLabel">녹화</span></button>
+    <button id="btnClips" type="button" aria-expanded="false" aria-controls="clips">녹화 목록 <span id="clipCount" class="count">0</span></button>
+    <button id="btnSettings" type="button" aria-expanded="false" aria-controls="settings">설정</button>
+    <a id="btnHelp" class="linkbtn" href="./guide.html" target="_blank" rel="noopener">도움말</a>
+    <span class="spacer"></span>
+    <span class="hint">드래그로 시점 회전 · 휠/핀치로 확대</span>
+    <button id="btnPhone" type="button" hidden>휴대폰으로 열기</button>
+  </div>
+
+  <section id="settings" class="sheet" hidden aria-label="설정">
+    <h2>설정</h2>
+    <div class="toggles">
+      <button id="btnUpper" type="button" aria-pressed="false"><b>상반신 모드</b><small>앉아서 상체만 보여도 따라 움직임</small></button>
+      <button id="btnMirror" type="button" aria-pressed="true"><b>거울 모드</b><small>로봇이 거울처럼 움직임</small></button>
+      <button id="btnMove" type="button" aria-pressed="true"><b>이동 따라가기</b><small>좌우로 걸으면 로봇도 이동</small></button>
+      <button id="btnFlip" type="button"><b>카메라 전환</b><small>전면 / 후면 카메라</small></button>
+    </div>
+    <label class="field" for="selModel">AI 모델
+      <select id="selModel">
+        <option value="lite">빠름 (Lite)</option>
+        <option value="full">정확 (Full)</option>
+        <option value="heavy">최고 정확 (Heavy)</option>
+      </select>
+    </label>
+  </section>
+
+  <section id="clips" class="sheet" hidden aria-label="녹화 목록">
+    <h2>녹화 목록</h2>
+    <ul id="clipList"></ul>
+    <p id="clipEmpty" class="empty-note">아직 녹화한 동작이 없습니다. 카메라를 켜고 <b>녹화</b>를 눌러 보세요. 녹화한 동작은 어떤 로봇으로든 다시 재생할 수 있습니다.</p>
+    <div class="row">
+      <button id="btnImport" type="button">파일 불러오기</button>
+      <input id="fileImport" type="file" accept=".json,application/json" hidden>
+    </div>
+  </section>
+
+  <div id="player" hidden>
+    <button id="btnPlay" type="button" aria-label="일시정지">❚❚</button>
+    <div class="track">
+      <div class="meta"><b id="playName"></b><span id="playTime">0:00 / 0:00</span></div>
+      <input id="seek" type="range" min="0" max="1000" value="0" aria-label="재생 위치">
+    </div>
+    <button id="btnLoop" type="button" aria-pressed="true" title="반복 재생">반복</button>
+    <button id="btnClosePlayer" type="button" aria-label="재생 닫기">✕</button>
+  </div>
+
+  <section id="exporter" hidden aria-live="polite" aria-label="영상 저장">
+    <h2><span class="rec-dot" id="expDot"></span><span id="expTitle">영상 만드는 중…</span></h2>
+    <p id="expNote">재생이 끝날 때까지 이 화면을 켜 두세요. 드래그로 시점을 바꾸면 영상에도 그대로 담깁니다.</p>
+    <div class="bar" id="expBarWrap"><i id="expBar"></i></div>
+    <video id="expPreview" playsinline controls muted hidden></video>
+    <div class="row">
+      <button id="expSave" type="button" hidden>영상 저장</button>
+      <button id="expShare" type="button" hidden>공유 · 사진에 저장</button>
+      <button id="expCancel" type="button">취소</button>
+    </div>
+  </section>
+
+  <div id="msg" hidden></div>
+
+  <div id="guide" role="status" aria-live="polite" hidden>
+    <svg viewBox="0 0 64 80" width="52" height="65" aria-hidden="true">
+      <rect x="3" y="3" width="58" height="74" rx="6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-dasharray="6 5"/>
+      <circle cx="32" cy="17" r="6" fill="currentColor"/>
+      <path d="M32 25v24M32 31l-11 9M32 31l11 9M32 49l-8 18M32 49l8 18" stroke="currentColor" stroke-width="4" stroke-linecap="round" fill="none"/>
+    </svg>
+    <div>
+      <strong id="guideTitle">카메라 앞에 서 주세요</strong>
+      <span id="guideHint">몸 전체가 화면에 들어오도록 휴대폰에서 2~3m 떨어져 서 주세요.</span>
+      <em id="guideFoot">몸 전체가 보이면 로봇이 다시 따라 움직입니다</em>
+    </div>
+  </div>
+
+  <section id="connect" hidden aria-labelledby="connectTitle">
+    <h2 id="connectTitle">휴대폰 카메라로 열기</h2>
+    <p>휴대폰 기본 카메라로 QR 코드를 비추고 뜨는 링크를 누르세요.</p>
+    <div id="qr"></div>
+    <div id="connectUrl"></div>
+    <p id="connectNote"></p>
+    <div class="row">
+      <button id="btnCopy" type="button">주소 복사</button>
+      <button id="btnCloseConnect" type="button">닫기</button>
+    </div>
+  </section>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { PoseLandmarker, HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const MODEL_URL = (v) =>
+  `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_${v}/float16/1/pose_landmarker_${v}.task`;
+
+/* ---------- UI refs ---------- */
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status"), video = $("video"), overlay = $("overlay"), octx = overlay.getContext("2d");
+const pip = $("pip"), pipEmpty = $("pipEmpty"), msgEl = $("msg");
+const btnStart = $("btnStart"), btnFlip = $("btnFlip"), btnMirror = $("btnMirror"), btnMove = $("btnMove"), selModel = $("selModel");
+
+function setStatus(text, state) { statusEl.textContent = text; statusEl.dataset.state = state; }
+function showMsg(html) { msgEl.innerHTML = html; msgEl.hidden = false; }
+function hideMsg() { msgEl.hidden = true; }
+
+/* ---------- Settings ---------- */
+const settings = { mirror: true, follow: true, facing: "user", model: "lite", upper: false };
+
+/* ---------- 3D scene ---------- */
+const stage = $("stage");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0e1418);
+scene.fog = new THREE.Fog(0x0e1418, 7, 16);
+
+const camera = new THREE.PerspectiveCamera(38, 1, 0.05, 50);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.95, 0);
+controls.enableDamping = true;
+controls.minDistance = 1.5;
+controls.maxDistance = 9;
+controls.maxPolarAngle = Math.PI * 0.52;
+
+// soft studio reflections so chrome, gold and clear-coat surfaces read as real materials
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+pmrem.dispose();
+scene.add(new THREE.HemisphereLight(0xcfe6ef, 0x1a1410, 0.45));
+const key = new THREE.DirectionalLight(0xffffff, 1.8);
+key.position.set(2.5, 5, 3.5);
+key.castShadow = true;
+key.shadow.mapSize.set(1024, 1024);
+Object.assign(key.shadow.camera, { left: -3, right: 3, top: 3, bottom: -3, near: 0.5, far: 15 });
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x4fd1c5, 1.1);
+rim.position.set(-3, 2.5, -3);
+scene.add(rim);
+
+// Floor: lab pad with grid and calibration rings
+const floor = new THREE.Mesh(
+  new THREE.CircleGeometry(8, 64),
+  new THREE.MeshStandardMaterial({ color: 0x151d22, roughness: 0.95 })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+const grid = new THREE.GridHelper(16, 32, 0x2a3a44, 0x1c272e);
+grid.position.y = 0.001;
+scene.add(grid);
+for (const r of [0.6, 1.2]) {
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(r - 0.008, r, 96),
+    new THREE.MeshBasicMaterial({ color: 0x4fd1c5, transparent: true, opacity: r < 1 ? 0.5 : 0.22 })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.002;
+  scene.add(ring);
+}
+
+/* ---------- Robots (procedural humanoids sharing one skeleton) ---------- */
+// Every robot has the same joint names, so retargeting works for all of them.
+// Only proportions (dims) and the parts hung on each joint (dress) differ.
+function node(parent, x = 0, y = 0, z = 0) {
+  const n = new THREE.Object3D();
+  n.position.set(x, y, z);
+  parent.add(n);
+  return n;
+}
+function mesh(geo, mat, x = 0, y = 0, z = 0) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  return m;
+}
+const std = (color, roughness = 0.45, metalness = 0.2, extra = {}) =>
+  new THREE.MeshStandardMaterial({ color, roughness, metalness, ...extra });
+const glow = (color, intensity = 1) =>
+  new THREE.MeshStandardMaterial({ color: 0x0b1215, emissive: color, emissiveIntensity: intensity, roughness: 0.25 });
+const capsule = (len, r) => new THREE.CapsuleGeometry(r, Math.max(len - 2 * r, 0.01), 6, 14);
+const SIDES = [["L", 1], ["R", -1]];
+
+// limb segment hanging down local -Y with a joint ball at its root
+function segment(parent, len, r, mat, jointMat, jointScale = 1.12) {
+  parent.add(mesh(capsule(len, r), mat, 0, -len / 2, 0));
+  if (jointMat) parent.add(mesh(new THREE.SphereGeometry(r * jointScale, 16, 12), jointMat));
+}
+
+// Premium-surface helpers (need scene.environment for reflections)
+const phys = (params) => new THREE.MeshPhysicalMaterial(params);
+const rbox = (w, h, d, r, mat, x = 0, y = 0, z = 0) => mesh(new RoundedBoxGeometry(w, h, d, 4, r), mat, x, y, z);
+const ball = (r, mat, x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1, seg = 28) => {
+  const m = mesh(new THREE.SphereGeometry(r, seg, Math.round(seg * 0.7)), mat, x, y, z);
+  m.scale.set(sx, sy, sz);
+  return m;
+};
+// tapered limb hanging down local -Y, with rounded ends
+function taper(parent, len, rTop, rBot, mat, seg = 20) {
+  parent.add(mesh(new THREE.CylinderGeometry(rTop, rBot, len, seg), mat, 0, -len / 2, 0));
+  parent.add(ball(rBot, mat, 0, -len, 0, 1, 1, 1, seg));
+}
+// Claw hand hung on the wrist: a palm block, two fingers on the back of the hand and an opposing thumb
+// on the palm side. Each digit has two hinged segments; setClaw() opens (grip 0) or closes (grip 1) them.
+// Rest pose: hand hangs down -Y, palm faces the body (-sx on X), index side toward +Z.
+function claw(J, s, sx, D, { shell, joint, tip = shell, size = 0.09, round = true }) {
+  const w = J["wrist" + s];
+  const palmL = D.hand * 0.45, px = size * 0.5, pz = size * 0.95, t = size * 0.25;
+  const box = (bw, bh, bd, mat, x, y, z) => round
+    ? rbox(bw, bh, bd, Math.min(bw, bh, bd) * 0.3, mat, x, y, z)
+    : mesh(new THREE.BoxGeometry(bw, bh, bd), mat, x, y, z);
+  w.add(box(px, palmL, pz, shell, 0, -palmL / 2 - 0.012, 0));
+  const baseY = -palmL - 0.012, len = D.hand * 0.95;
+  const digits = [];
+  const add = (side, z, l, width) => {
+    const h1 = node(w, side * sx * px * 0.5, baseY, z);
+    h1.add(ball(t * 0.6, joint, 0, 0, 0, 1, 1, 1, 12));
+    h1.add(box(t, l * 0.55, width, shell, 0, -l * 0.275, 0));
+    const h2 = node(h1, 0, -l * 0.55, 0);
+    h2.add(ball(t * 0.52, joint, 0, 0, 0, 1, 1, 1, 12));
+    h2.add(box(t * 0.85, l * 0.45, width * 0.9, tip, 0, -l * 0.225, 0));
+    digits.push({ h1, h2, k: -side * sx, thumb: side < 0 });   // k: rotation sign that curls toward the palm
+  };
+  add(1, pz * 0.25, len, pz * 0.42);
+  add(1, -pz * 0.25, len, pz * 0.42);
+  add(-1, 0, len * 0.82, pz * 0.48);
+  J["claw" + s] = digits;
+  setClaw(digits, 0.2);
+}
+function setClaw(digits, g) {
+  if (!digits) return;
+  for (const d of digits) {
+    // open: digits flare apart; closed: hooked tips meet in the middle like a pincer
+    const a1 = THREE.MathUtils.lerp(-0.5, 0.05, g);
+    const a2 = THREE.MathUtils.lerp(0.08, 0.5, g);
+    d.h1.rotation.z = d.k * a1;
+    d.h2.rotation.z = d.k * a2;
+  }
+}
+
+// partial sphere shell facing +Z (visors)
+function visorShell(r, mat, y, width = 1.4, height = 0.6, tilt = 0) {
+  const g = new THREE.SphereGeometry(r, 40, 20, Math.PI / 2 - width / 2, width, Math.PI / 2 - height / 2 + tilt, height);
+  return mesh(g, mat, 0, y, 0);
+}
+
+const ROBOTS = {
+  aether: {
+    name: "에테르", desc: "펄 세라믹 · 샴페인 골드", swatch: "#efe9df",
+    dims: {
+      hipH: 0.98, chestY: 0.12, neckY: 0.44, headY: 0.06,
+      shoulderX: 0.2, shoulderY: 0.34, upperArm: 0.29, foreArm: 0.27, hand: 0.1,
+      hipX: 0.095, hipY: -0.06, thigh: 0.45, shin: 0.44,
+      footDrop: 0.068, toeZ: 0.17, heelZ: 0.06,
+    },
+    dress(J, D) {
+      const pearl = phys({ color: 0xf4f1ec, roughness: 0.3, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.06 });
+      const gold = phys({ color: 0xcaa874, roughness: 0.26, metalness: 1 });
+      const glass = phys({ color: 0x0b0e11, roughness: 0.04, metalness: 0.3, clearcoat: 1, clearcoatRoughness: 0.02 });
+      const light = glow(0xffe9c7, 1.6);
+      J.pelvis.add(rbox(0.27, 0.13, 0.17, 0.05, pearl, 0, -0.02, 0));
+      J.pelvis.add(rbox(0.278, 0.024, 0.176, 0.01, gold, 0, 0.035, 0));
+      J.chest.add(mesh(new THREE.CylinderGeometry(0.068, 0.084, 0.14, 28), gold, 0, 0.05, 0));
+      J.chest.add(rbox(0.33, 0.25, 0.2, 0.08, pearl, 0, 0.26, 0));
+      J.chest.add(rbox(0.38, 0.1, 0.21, 0.05, pearl, 0, 0.38, 0));
+      J.chest.add(mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.006, 28), light, 0, 0.29, 0.1).rotateX(Math.PI / 2));
+      J.chest.add(rbox(0.16, 0.005, 0.004, 0.002, light, 0, 0.345, 0.106));
+      J.neck.add(mesh(new THREE.CylinderGeometry(0.03, 0.038, 0.1, 24), gold));
+      J.head.add(ball(0.105, pearl, 0, 0.12, 0, 0.9, 1.08, 1.02, 40));
+      const visor = visorShell(0.108, glass, 0.12, 1.5, 0.62, 0.08);
+      visor.scale.set(0.91, 1.09, 1.03);
+      J.head.add(visor);
+      J.head.add(rbox(0.08, 0.007, 0.004, 0.002, light, 0, 0.122, 0.112));
+      for (const [s, sx] of SIDES) {
+        J["shoulder" + s].add(ball(0.066, pearl, sx * 0.01, 0.012, 0, 1, 0.9, 1));
+        taper(J["shoulder" + s], D.upperArm, 0.046, 0.04, pearl);
+        J["elbow" + s].add(ball(0.043, gold));
+        taper(J["elbow" + s], D.foreArm, 0.041, 0.033, pearl);
+        J["wrist" + s].add(ball(0.031, gold));
+        claw(J, s, sx, D, { shell: pearl, joint: gold, size: 0.085 });
+        J["hip" + s].add(ball(0.062, gold));
+        taper(J["hip" + s], D.thigh, 0.066, 0.05, pearl);
+        J["knee" + s].add(ball(0.052, gold));
+        J["knee" + s].add(rbox(0.075, 0.08, 0.03, 0.014, pearl, 0, -0.01, 0.048));
+        taper(J["knee" + s], D.shin, 0.05, 0.037, pearl);
+        J["ankle" + s].add(ball(0.04, gold));
+        J["ankle" + s].add(rbox(0.09, 0.055, 0.22, 0.026, pearl, 0, -0.038, 0.05));
+        J["ankle" + s].add(rbox(0.094, 0.012, 0.224, 0.005, gold, 0, -0.066, 0.05));
+      }
+    },
+  },
+
+  phantom: {
+    name: "팬텀", desc: "스텔스 각진 장갑", swatch: "#a7aebb",
+    dims: {
+      hipH: 1.0, chestY: 0.13, neckY: 0.46, headY: 0.05,
+      shoulderX: 0.23, shoulderY: 0.34, upperArm: 0.3, foreArm: 0.28, hand: 0.11,
+      hipX: 0.1, hipY: -0.06, thigh: 0.45, shin: 0.45,
+      footDrop: 0.075, toeZ: 0.2, heelZ: 0.07,
+    },
+    dress(J, D) {
+      // light titanium plates over a mid-grey frame, with graphite joints for contrast
+      const matte = std(0x7c8592, 0.6, 0.45, { flatShading: true });
+      const plate = std(0xc9ced8, 0.3, 0.65, { flatShading: true });
+      const core = std(0x3a3f4a, 0.35, 0.8, { flatShading: true });
+      const seam = glow(0xff3b4f, 2.4);
+      const red = std(0xc4202f, 0.32, 0.55, { flatShading: true, emissive: 0x5a0610, emissiveIntensity: 0.6 });
+      const hex = (rt, rb, h, mat, x, y, z, sides = 6) => mesh(new THREE.CylinderGeometry(rt, rb, h, sides), mat, x, y, z);
+      J.pelvis.add(hex(0.15, 0.11, 0.15, matte, 0, -0.02, 0));
+      J.chest.add(hex(0.08, 0.1, 0.15, red, 0, 0.05, 0));       // waist
+      const torso = hex(0.21, 0.12, 0.32, plate, 0, 0.28, 0);
+      torso.scale.z = 0.6;
+      J.chest.add(torso);
+      for (const sx of [1, -1]) J.chest.add(mesh(new THREE.BoxGeometry(0.13, 0.008, 0.006), seam, sx * 0.075, 0.3, 0.112).rotateZ(sx * -0.45));
+      J.chest.add(hex(0.12, 0.15, 0.06, matte, 0, 0.45, 0));
+      J.neck.add(hex(0.035, 0.045, 0.09, red, 0, 0, 0));
+      const head = mesh(new THREE.DodecahedronGeometry(0.11), plate, 0, 0.12, 0);
+      head.scale.set(0.85, 1.05, 0.95);
+      J.head.add(head);
+      J.head.add(mesh(new THREE.BoxGeometry(0.09, 0.012, 0.01), seam, 0, 0.125, 0.098));
+      for (const sx of [1, -1]) J.head.add(mesh(new THREE.BoxGeometry(0.012, 0.11, 0.05), matte, sx * 0.075, 0.2, -0.04).rotateZ(sx * -0.35).rotateX(0.4));
+      for (const [s, sx] of SIDES) {
+        J["shoulder" + s].add(hex(0.09, 0.07, 0.15, plate, sx * 0.04, 0.02, 0, 5).rotateZ(Math.PI / 2));
+        J["shoulder" + s].add(hex(0.05, 0.042, D.upperArm, matte, 0, -D.upperArm / 2, 0));
+        J["elbow" + s].add(mesh(new THREE.IcosahedronGeometry(0.05, 0), core));
+        J["elbow" + s].add(hex(0.06, 0.045, D.foreArm * 0.9, plate, 0, -D.foreArm / 2, 0));
+        J["elbow" + s].add(mesh(new THREE.BoxGeometry(0.006, D.foreArm * 0.55, 0.006), seam, 0, -D.foreArm / 2, 0.054));
+        J["wrist" + s].add(mesh(new THREE.IcosahedronGeometry(0.035, 0), core));
+        claw(J, s, sx, D, { shell: plate, joint: core, tip: red, size: 0.09, round: false });
+        J["hip" + s].add(mesh(new THREE.IcosahedronGeometry(0.06, 0), core));
+        J["hip" + s].add(hex(0.075, 0.055, D.thigh, matte, 0, -D.thigh / 2, 0));
+        J["hip" + s].add(mesh(new THREE.BoxGeometry(0.1, D.thigh * 0.55, 0.03), plate, 0, -D.thigh * 0.42, 0.065));
+        J["knee" + s].add(mesh(new THREE.IcosahedronGeometry(0.055, 0), core));
+        J["knee" + s].add(mesh(new THREE.ConeGeometry(0.05, 0.1, 4), plate, 0, 0, 0.065).rotateX(Math.PI / 2));
+        J["knee" + s].add(hex(0.065, 0.045, D.shin * 0.95, plate, 0, -D.shin / 2, 0));
+        J["knee" + s].add(mesh(new THREE.BoxGeometry(0.006, D.shin * 0.5, 0.006), seam, 0, -D.shin / 2, 0.058));
+        J["ankle" + s].add(mesh(new THREE.IcosahedronGeometry(0.045, 0), core));
+        J["ankle" + s].add(mesh(new THREE.BoxGeometry(0.1, 0.06, 0.27), matte, 0, -0.045, 0.06));
+      }
+    },
+  },
+
+  aurora: {
+    name: "오로라", desc: "무지갯빛 리퀴드 크롬", swatch: "#c4a0ff",
+    dims: {
+      hipH: 1.0, chestY: 0.12, neckY: 0.45, headY: 0.06,
+      shoulderX: 0.19, shoulderY: 0.34, upperArm: 0.3, foreArm: 0.28, hand: 0.1,
+      hipX: 0.09, hipY: -0.05, thigh: 0.46, shin: 0.46,
+      footDrop: 0.058, toeZ: 0.16, heelZ: 0.05,
+    },
+    dress(J, D) {
+      const chrome = phys({
+        color: 0xf2ecff, metalness: 0.85, roughness: 0.2,
+        iridescence: 1, iridescenceIOR: 2.0, iridescenceThicknessRange: [250, 520],
+        clearcoat: 1, clearcoatRoughness: 0.05,
+      });
+      const satin = phys({ color: 0x3b3f4e, metalness: 0.8, roughness: 0.3, clearcoat: 0.6 });
+      const glass = phys({ color: 0x120f1a, roughness: 0.03, metalness: 0.4, clearcoat: 1 });
+      const core = new THREE.MeshStandardMaterial({ color: 0x2a1a4a, emissive: 0x9b6bff, emissiveIntensity: 1.1, roughness: 0.3 });
+      J.pelvis.add(ball(0.12, chrome, 0, -0.02, 0, 1, 0.55, 0.75, 36));
+      J.chest.add(mesh(new THREE.CylinderGeometry(0.052, 0.06, 0.14, 28), satin, 0, 0.05, 0));
+      const profile = [[0.0, 0], [0.09, 0], [0.12, 0.05], [0.165, 0.18], [0.18, 0.27], [0.16, 0.33], [0.1, 0.36], [0.0, 0.365]]
+        .map(([x, y]) => new THREE.Vector2(x, y));
+      const torso = mesh(new THREE.LatheGeometry(profile, 48), chrome, 0, 0.1, 0);
+      torso.scale.z = 0.62;
+      J.chest.add(torso);
+      J.chest.add(ball(0.036, core, 0, 0.28, 0.1));
+      J.chest.add(mesh(new THREE.TorusGeometry(0.052, 0.006, 12, 40), satin, 0, 0.28, 0.1));
+      J.neck.add(mesh(new THREE.CylinderGeometry(0.026, 0.034, 0.12, 24), satin));
+      J.head.add(ball(0.1, chrome, 0, 0.12, 0, 0.9, 1.1, 1, 40));
+      const visor = visorShell(0.103, glass, 0.12, 1.6, 0.5, 0.1);
+      visor.scale.set(0.91, 1.11, 1.01);
+      J.head.add(visor);
+      J.head.add(mesh(new THREE.TorusGeometry(0.15, 0.006, 12, 64), core, 0, 0.15, -0.11));   // halo ring
+      for (const [s, sx] of SIDES) {
+        J["shoulder" + s].add(ball(0.056, satin));
+        taper(J["shoulder" + s], D.upperArm, 0.041, 0.033, chrome);
+        J["elbow" + s].add(ball(0.038, satin));
+        taper(J["elbow" + s], D.foreArm, 0.036, 0.027, chrome);
+        J["wrist" + s].add(mesh(new THREE.TorusGeometry(0.03, 0.006, 10, 28), core).rotateX(Math.PI / 2));
+        claw(J, s, sx, D, { shell: chrome, joint: satin, tip: core, size: 0.08 });
+        J["hip" + s].add(ball(0.056, satin));
+        taper(J["hip" + s], D.thigh, 0.056, 0.042, chrome);
+        J["knee" + s].add(ball(0.045, satin));
+        taper(J["knee" + s], D.shin, 0.045, 0.031, chrome);
+        J["ankle" + s].add(ball(0.034, satin));
+        J["ankle" + s].add(ball(0.06, chrome, 0, -0.03, 0.05, 0.75, 0.45, 1.65));
+      }
+    },
+  },
+
+  guardian: {
+    name: "가디언", desc: "거대 메카 스타일", swatch: "#24345a",
+    dims: {
+      hipH: 1.02, chestY: 0.14, neckY: 0.5, headY: 0.05,
+      shoulderX: 0.3, shoulderY: 0.36, upperArm: 0.3, foreArm: 0.28, hand: 0.12,
+      hipX: 0.13, hipY: -0.07, thigh: 0.45, shin: 0.45,
+      footDrop: 0.09, toeZ: 0.21, heelZ: 0.1,
+    },
+    dress(J, D) {
+      const white = std(0xf1f2ee, 0.4, 0.15), navy = std(0x24345a, 0.45, 0.35), frame = std(0x3b4048, 0.4, 0.7);
+      const yellow = std(0xf2c230, 0.4, 0.3), eye = glow(0x5ee0ff, 1.5), jet = glow(0xff9a3c, 1.8);
+      // waist + skirt armor
+      J.pelvis.add(mesh(new THREE.BoxGeometry(0.34, 0.14, 0.22), frame, 0, -0.02, 0));
+      J.pelvis.add(mesh(new THREE.BoxGeometry(0.08, 0.1, 0.04), navy, 0, -0.06, 0.125));
+      for (const sx of [1, -1]) {
+        J.pelvis.add(mesh(new THREE.BoxGeometry(0.13, 0.17, 0.03), white, sx * 0.1, -0.1, 0.12).rotateX(-0.18));
+        J.pelvis.add(mesh(new THREE.BoxGeometry(0.03, 0.17, 0.15), white, sx * 0.19, -0.08, 0).rotateZ(sx * 0.12));
+      }
+      // torso
+      J.chest.add(mesh(new THREE.CylinderGeometry(0.1, 0.12, 0.16, 16), frame, 0, 0.04, 0));
+      J.chest.add(mesh(new THREE.BoxGeometry(0.26, 0.12, 0.2), frame, 0, 0.12, 0));
+      J.chest.add(mesh(new THREE.BoxGeometry(0.46, 0.24, 0.28), navy, 0, 0.3, 0));
+      J.chest.add(mesh(new THREE.BoxGeometry(0.3, 0.06, 0.25), white, 0, 0.44, 0));
+      for (const sx of [1, -1]) J.chest.add(mesh(new THREE.BoxGeometry(0.1, 0.06, 0.02), yellow, sx * 0.11, 0.3, 0.142));
+      // backpack with two thrusters
+      J.chest.add(mesh(new THREE.BoxGeometry(0.3, 0.28, 0.14), white, 0, 0.3, -0.2));
+      for (const sx of [1, -1]) {
+        J.chest.add(mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.14, 14), frame, sx * 0.08, 0.14, -0.28));
+        J.chest.add(mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.01, 14), jet, sx * 0.08, 0.065, -0.28));
+      }
+      // head: helmet, mono visor, single blade crest
+      J.neck.add(mesh(new THREE.CylinderGeometry(0.045, 0.055, 0.08, 12), frame));
+      J.head.add(mesh(new THREE.BoxGeometry(0.17, 0.16, 0.18), white, 0, 0.09, 0));
+      J.head.add(mesh(new THREE.BoxGeometry(0.12, 0.07, 0.03), frame, 0, 0.065, 0.09));
+      J.head.add(mesh(new THREE.BoxGeometry(0.12, 0.025, 0.02), eye, 0, 0.115, 0.098));
+      J.head.add(mesh(new THREE.BoxGeometry(0.018, 0.13, 0.07), yellow, 0, 0.21, 0.03).rotateX(-0.35));
+      for (const sx of [1, -1]) J.head.add(mesh(new THREE.BoxGeometry(0.03, 0.1, 0.13), navy, sx * 0.1, 0.09, 0));
+      for (const [s, sx] of SIDES) {
+        // shoulder block with stripe
+        J["shoulder" + s].add(mesh(new THREE.BoxGeometry(0.2, 0.2, 0.24), white, sx * 0.04, 0.02, 0));
+        J["shoulder" + s].add(mesh(new THREE.BoxGeometry(0.205, 0.04, 0.245), navy, sx * 0.04, 0.07, 0));
+        segment(J["shoulder" + s], D.upperArm, 0.055, frame, frame);
+        J["elbow" + s].add(mesh(new THREE.SphereGeometry(0.06, 14, 10), frame));
+        J["elbow" + s].add(mesh(new THREE.BoxGeometry(0.13, D.foreArm * 0.8, 0.15), white, 0, -D.foreArm / 2, 0));
+        J["elbow" + s].add(mesh(new THREE.BoxGeometry(0.135, 0.04, 0.155), navy, 0, -D.foreArm * 0.85, 0));
+        J["wrist" + s].add(mesh(new THREE.SphereGeometry(0.045, 12, 10), frame));
+        claw(J, s, sx, D, { shell: white, joint: frame, tip: navy, size: 0.12, round: false });
+        segment(J["hip" + s], D.thigh, 0.075, frame, frame);
+        J["hip" + s].add(mesh(new THREE.BoxGeometry(0.15, 0.3, 0.17), white, 0, -0.21, 0));
+        J["knee" + s].add(mesh(new THREE.SphereGeometry(0.07, 14, 10), frame));
+        J["knee" + s].add(mesh(new THREE.BoxGeometry(0.13, 0.12, 0.07), navy, 0, -0.02, 0.09));
+        J["knee" + s].add(mesh(new THREE.BoxGeometry(0.17, D.shin * 0.8, 0.19), white, 0, -D.shin / 2, 0));
+        J["knee" + s].add(mesh(new THREE.BoxGeometry(0.06, D.shin * 0.5, 0.02), navy, 0, -D.shin / 2, 0.1));
+        J["ankle" + s].add(mesh(new THREE.SphereGeometry(0.06, 12, 10), frame));
+        J["ankle" + s].add(mesh(new THREE.BoxGeometry(0.17, 0.08, 0.32), navy, 0, -0.05, 0.06));
+        J["ankle" + s].add(mesh(new THREE.BoxGeometry(0.172, 0.05, 0.08), white, 0, -0.055, 0.2));
+      }
+    },
+  },
+
+  striker: {
+    name: "스트라이커", desc: "파워드 아머 수트", swatch: "#b8734a",
+    dims: {
+      hipH: 0.97, chestY: 0.12, neckY: 0.44, headY: 0.05,
+      shoulderX: 0.21, shoulderY: 0.33, upperArm: 0.29, foreArm: 0.26, hand: 0.11,
+      hipX: 0.1, hipY: -0.06, thigh: 0.43, shin: 0.42,
+      footDrop: 0.08, toeZ: 0.18, heelZ: 0.07,
+    },
+    dress(J, D) {
+      const gun = std(0x3c4148, 0.3, 0.85), copper = std(0xb8734a, 0.32, 0.85), under = std(0x1a1d21, 0.5, 0.5);
+      const core = glow(0x8fe3ff, 2.0);
+      const scaled = (geo, mat, [x, y, z], [sx, sy, sz]) => { const m = mesh(geo, mat, x, y, z); m.scale.set(sx, sy, sz); return m; };
+      J.pelvis.add(mesh(new THREE.BoxGeometry(0.3, 0.14, 0.19), under, 0, -0.02, 0));
+      J.pelvis.add(mesh(new THREE.BoxGeometry(0.32, 0.04, 0.2), copper, 0, 0.04, 0));
+      // segmented abdomen, chest plates, hexagonal energy core
+      J.chest.add(mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.16, 16), under, 0, 0.04, 0));
+      for (const y of [0.06, 0.1, 0.14]) J.chest.add(mesh(new THREE.BoxGeometry(0.22, 0.035, 0.17), gun, 0, y, 0));
+      J.chest.add(mesh(new THREE.BoxGeometry(0.38, 0.22, 0.22), gun, 0, 0.29, 0));
+      for (const sx of [1, -1]) J.chest.add(mesh(new THREE.BoxGeometry(0.15, 0.12, 0.03), copper, sx * 0.09, 0.32, 0.115));
+      J.chest.add(mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.02, 6), core, 0, 0.27, 0.13).rotateX(Math.PI / 2));
+      J.chest.add(mesh(new THREE.BoxGeometry(0.42, 0.05, 0.2), copper, 0, 0.41, 0));
+      // helmet with faceplate and visor slit
+      J.neck.add(mesh(new THREE.CylinderGeometry(0.035, 0.045, 0.08, 12), under));
+      J.head.add(scaled(new THREE.SphereGeometry(0.11, 28, 20), gun, [0, 0.11, 0], [0.92, 1.08, 1.05]));
+      J.head.add(mesh(new THREE.BoxGeometry(0.15, 0.13, 0.04), copper, 0, 0.09, 0.085));
+      J.head.add(mesh(new THREE.BoxGeometry(0.12, 0.018, 0.01), core, 0, 0.12, 0.108));
+      J.head.add(mesh(new THREE.BoxGeometry(0.11, 0.04, 0.05), gun, 0, 0.03, 0.07));
+      for (const [s, sx] of SIDES) {
+        J["shoulder" + s].add(scaled(new THREE.SphereGeometry(0.075, 18, 12), copper, [sx * 0.01, 0.02, 0], [1, 0.8, 1]));
+        segment(J["shoulder" + s], D.upperArm, 0.048, gun, under);
+        J["elbow" + s].add(mesh(new THREE.SphereGeometry(0.05, 12, 10), under));
+        J["elbow" + s].add(mesh(new THREE.CylinderGeometry(0.056, 0.046, D.foreArm * 0.8, 14), copper, 0, -D.foreArm / 2, 0));
+        J["elbow" + s].add(mesh(new THREE.TorusGeometry(0.047, 0.007, 8, 24), core, 0, -D.foreArm * 0.9, 0).rotateX(Math.PI / 2));
+        claw(J, s, sx, D, { shell: gun, joint: under, tip: copper, size: 0.09 });
+        segment(J["hip" + s], D.thigh, 0.065, gun, under);
+        J["hip" + s].add(mesh(new THREE.BoxGeometry(0.14, 0.28, 0.15), gun, 0, -0.2, 0));
+        J["knee" + s].add(scaled(new THREE.SphereGeometry(0.06, 14, 10), copper, [0, 0, 0.03], [1, 1, 0.8]));
+        J["knee" + s].add(mesh(new THREE.CylinderGeometry(0.06, 0.05, D.shin * 0.85, 14), gun, 0, -D.shin / 2, 0));
+        J["knee" + s].add(mesh(new THREE.BoxGeometry(0.07, D.shin * 0.6, 0.02), copper, 0, -D.shin / 2, 0.056));
+        J["ankle" + s].add(mesh(new THREE.SphereGeometry(0.045, 12, 10), under));
+        J["ankle" + s].add(mesh(new THREE.BoxGeometry(0.11, 0.08, 0.26), copper, 0, -0.045, 0.05));
+        J["ankle" + s].add(mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.01, 16), core, 0, -0.086, -0.06));
+      }
+    },
+  },
+
+  titan: {
+    name: "타이탄", desc: "중장갑 작업용", swatch: "#d9822b",
+    dims: {
+      hipH: 1.0, chestY: 0.14, neckY: 0.5, headY: 0.05,
+      shoulderX: 0.31, shoulderY: 0.36, upperArm: 0.3, foreArm: 0.28, hand: 0.13,
+      hipX: 0.14, hipY: -0.06, thigh: 0.44, shin: 0.44,
+      footDrop: 0.09, toeZ: 0.22, heelZ: 0.1,
+    },
+    dress(J, D) {
+      const armor = std(0xd9822b, 0.45, 0.4), steel = std(0x2b3034, 0.4, 0.75);
+      const joint = std(0x5d666d, 0.35, 0.8), lamp = glow(0xffc857, 1.4);
+      J.pelvis.add(mesh(new THREE.BoxGeometry(0.38, 0.18, 0.24), steel, 0, -0.02, 0));
+      J.pelvis.add(mesh(new THREE.BoxGeometry(0.2, 0.14, 0.04), armor, 0, -0.04, 0.13));
+      J.chest.add(mesh(new THREE.CylinderGeometry(0.11, 0.13, 0.18, 16), steel, 0, 0.05, 0));
+      J.chest.add(mesh(new THREE.BoxGeometry(0.4, 0.12, 0.26), steel, 0, 0.12, 0));
+      J.chest.add(mesh(new THREE.BoxGeometry(0.52, 0.32, 0.3), armor, 0, 0.32, 0));
+      J.chest.add(mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.03, 20), lamp, 0, 0.3, 0.155).rotateX(Math.PI / 2));
+      J.chest.add(mesh(new THREE.BoxGeometry(0.34, 0.3, 0.14), steel, 0, 0.3, -0.2));
+      J.neck.add(mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.08, 12), steel));
+      J.head.add(mesh(new THREE.BoxGeometry(0.19, 0.16, 0.2), armor, 0, 0.09, 0));
+      J.head.add(mesh(new THREE.BoxGeometry(0.15, 0.035, 0.02), lamp, 0, 0.1, 0.105));
+      J.head.add(mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.16, 6), steel, 0.07, 0.24, -0.04));
+      J.head.add(mesh(new THREE.SphereGeometry(0.014, 10, 8), lamp, 0.07, 0.32, -0.04));
+      for (const [s, sx] of SIDES) {
+        J["shoulder" + s].add(mesh(new THREE.BoxGeometry(0.2, 0.15, 0.22), armor, sx * 0.03, 0.03, 0));
+        segment(J["shoulder" + s], D.upperArm, 0.06, steel, joint);
+        J["elbow" + s].add(mesh(new THREE.SphereGeometry(0.065, 14, 10), joint));
+        J["elbow" + s].add(mesh(new THREE.BoxGeometry(0.13, D.foreArm * 0.85, 0.14), armor, 0, -D.foreArm / 2, 0));
+        J["wrist" + s].add(mesh(new THREE.SphereGeometry(0.05, 12, 10), joint));
+        claw(J, s, sx, D, { shell: steel, joint: joint, tip: armor, size: 0.13, round: false });
+        segment(J["hip" + s], D.thigh, 0.08, steel, joint);
+        J["hip" + s].add(mesh(new THREE.BoxGeometry(0.16, 0.28, 0.17), armor, 0, -0.2, 0));
+        J["knee" + s].add(mesh(new THREE.SphereGeometry(0.075, 14, 10), joint));
+        J["knee" + s].add(mesh(new THREE.BoxGeometry(0.12, 0.1, 0.06), armor, 0, 0, 0.08));
+        J["knee" + s].add(mesh(new THREE.BoxGeometry(0.15, D.shin * 0.85, 0.17), armor, 0, -D.shin / 2, 0));
+        J["ankle" + s].add(mesh(new THREE.SphereGeometry(0.06, 12, 10), joint));
+        J["ankle" + s].add(mesh(new THREE.BoxGeometry(0.17, 0.08, 0.34), steel, 0, -0.05, 0.06));
+      }
+    },
+  },
+
+};
+
+const DEFAULT_ROBOT = "aether";
+
+function buildRobot(id) {
+  const style = ROBOTS[id] || ROBOTS[DEFAULT_ROBOT];
+  const D = style.dims;
+  const root = new THREE.Group();
+  const J = {};
+  J.pelvis = node(root, 0, D.hipH, 0);
+  J.chest = node(J.pelvis, 0, D.chestY, 0);
+  J.neck = node(J.chest, 0, D.neckY, 0);
+  J.head = node(J.neck, 0, D.headY, 0);
+  for (const [s, sx] of SIDES) {
+    J["shoulder" + s] = node(J.chest, sx * D.shoulderX, D.shoulderY, 0);
+    J["elbow" + s] = node(J["shoulder" + s], 0, -D.upperArm, 0);
+    J["wrist" + s] = node(J["elbow" + s], 0, -D.foreArm, 0);
+    J["hip" + s] = node(J.pelvis, sx * D.hipX, D.hipY, 0);
+    J["knee" + s] = node(J["hip" + s], 0, -D.thigh, 0);
+    J["ankle" + s] = node(J["knee" + s], 0, -D.shin, 0);
+    // contact points used for ground locking
+    J["toe" + s] = node(J["ankle" + s], 0, -D.footDrop, D.toeZ);
+    J["heel" + s] = node(J["ankle" + s], 0, -D.footDrop, -D.heelZ);
+  }
+  style.dress(J, D);
+  style.post?.(root);
+  const shadows = style.shadows !== false;
+  root.traverse((o) => { if (o.isMesh) { o.castShadow = shadows; o.receiveShadow = shadows; } });
+  return { id: ROBOTS[id] ? id : DEFAULT_ROBOT, root, J, D };
+}
+
+function disposeRobot(r) {
+  const mats = new Set();
+  r.root.traverse((o) => { if (o.isMesh) { o.geometry.dispose(); mats.add(o.material); } });
+  mats.forEach((m) => m.dispose());
+}
+
+const ROBOT_KEY = "motion-mirror-robot";
+let savedRobot = DEFAULT_ROBOT;
+try { savedRobot = localStorage.getItem(ROBOT_KEY) || DEFAULT_ROBOT; } catch {}
+let robot = buildRobot(savedRobot);
+let root = robot.root, J = robot.J;
+scene.add(root);
+
+function setRobot(id) {
+  if (id === robot.id) return;
+  const next = buildRobot(id);
+  // carry the current pose over so the swap is seamless
+  for (const k of Object.keys(J)) if (J[k].isObject3D && next.J[k]?.isObject3D) next.J[k].quaternion.copy(J[k].quaternion);
+  next.root.position.copy(root.position);
+  scene.remove(root);
+  disposeRobot(robot);
+  // reframe the camera around the new robot's height
+  const k = next.D.hipH / robot.D.hipH;
+  const offset = camera.position.clone().sub(controls.target).multiplyScalar(THREE.MathUtils.clamp(k, 0.75, 1.35));
+  controls.target.y = next.D.hipH;
+  camera.position.copy(controls.target).add(offset);
+  robot = next; root = next.root; J = next.J;
+  scene.add(root);
+  try { localStorage.setItem(ROBOT_KEY, robot.id); } catch {}
+  renderRobotPicker();
+}
+
+/* ---------- Pose filtering (One Euro filter) ---------- */
+class OneEuro {
+  constructor(minCutoff = 1.2, beta = 1.5, dCutoff = 1.0) {
+    Object.assign(this, { minCutoff, beta, dCutoff });
+    this.reset();
+  }
+  reset() { this.t = null; this.x = 0; this.dx = 0; }
+  a(cutoff, dt) { const tau = 1 / (2 * Math.PI * cutoff); return 1 / (1 + tau / dt); }
+  filter(x, t) {
+    if (this.t === null) { this.t = t; this.x = x; this.dx = 0; return x; }
+    const dt = Math.max(t - this.t, 1e-3);
+    this.t = t;
+    const dx = (x - this.x) / dt;
+    this.dx += this.a(this.dCutoff, dt) * (dx - this.dx);
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
+    this.x += this.a(cutoff, dt) * (x - this.x);
+    return this.x;
+  }
+}
+const filters = Array.from({ length: 33 * 3 }, () => new OneEuro());
+const rootXFilter = new OneEuro(0.8, 0.8);
+function resetFilters() { filters.forEach((f) => f.reset()); rootXFilter.reset(); }
+
+// Left/right landmark swap used for mirror mode
+const SWAP = Array.from({ length: 33 }, (_, i) => i);
+for (const [a, b] of [[1, 4], [2, 5], [3, 6], [7, 8], [9, 10]]) { SWAP[a] = b; SWAP[b] = a; }
+for (let i = 11; i <= 31; i += 2) { SWAP[i] = i + 1; SWAP[i + 1] = i; }
+
+const P = Array.from({ length: 33 }, () => new THREE.Vector3());
+const VIS = new Float32Array(33);
+let poseTime = -1e9;
+let rootXTarget = 0;
+
+function ingestPose(world, norm, tMs) {
+  const t = tMs / 1000;
+  const sx = settings.mirror ? -1 : 1;
+  for (let i = 0; i < 33; i++) {
+    const src = settings.mirror ? SWAP[i] : i;
+    const w = world[src];
+    // MediaPipe world: x right (image), y down, z toward camera is negative -> three.js: y up, +z toward viewer
+    P[i].set(
+      filters[i * 3].filter(sx * w.x, t),
+      filters[i * 3 + 1].filter(-w.y, t),
+      filters[i * 3 + 2].filter(-w.z, t)
+    );
+    VIS[i] = norm[src].visibility ?? 1;
+  }
+  // horizontal position: hips when the whole body is used, shoulders in upper-body mode
+  const [a, b] = settings.upper ? [11, 12] : [23, 24];
+  const bodyX = (norm[a].x + norm[b].x) / 2 - 0.5;
+  rootXTarget = rootXFilter.filter(sx * bodyX * 2.4, t);
+  poseTime = tMs;
+}
+
+/* ---------- Hands (upper-body mode): finger grip + precise palm direction ---------- */
+const HAND_MODEL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+const REST_GRIP = 0.2;                     // relaxed, slightly closed claw when no hand data
+let handLm = null, handLoading = null, handFrame = 0;
+// latest hand-model measurement per robot side; palm vectors are in three.js space relative to the wrist
+const HANDS = {
+  L: { t: -1e9, grip: REST_GRIP, toPinky: new THREE.Vector3(), toIndex: new THREE.Vector3(), norm: null },
+  R: { t: -1e9, grip: REST_GRIP, toPinky: new THREE.Vector3(), toIndex: new THREE.Vector3(), norm: null },
+};
+const gripLive = { L: -1, R: -1 };         // -1 = no fresh hand data this frame
+const gripNow = { L: REST_GRIP, R: REST_GRIP };
+
+function ensureHandLandmarker() {
+  if (handLm || handLoading || !vision) return;
+  const opts = (delegate) => ({
+    baseOptions: { modelAssetPath: HAND_MODEL, delegate },
+    runningMode: "VIDEO", numHands: 2,
+    minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+  });
+  handLoading = HandLandmarker.createFromOptions(vision, opts("GPU"))
+    .catch(() => HandLandmarker.createFromOptions(vision, opts("CPU")))
+    .then((h) => { handLm = h; })
+    .catch((e) => console.warn("hand model failed", e))
+    .finally(() => { handLoading = null; });
+}
+
+const d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+// 0 = open hand, 1 = fist: how far the fingertips reach past the knuckles, relative to the palm
+function measureGrip(wl) {
+  let r = 0;
+  for (const [mcp, tip] of [[5, 8], [9, 12], [13, 16], [17, 20]]) r += d3(wl[tip], wl[0]) / Math.max(d3(wl[mcp], wl[0]), 1e-4);
+  return THREE.MathUtils.clamp((1.7 - r / 4) / (1.7 - 1.1), 0, 1);
+}
+
+function ingestHands(res, norm, tMs) {
+  if (!res?.landmarks?.length) return;
+  const sx = settings.mirror ? -1 : 1;
+  // pair each detected hand with the nearer pose wrist (raw image landmarks 15 / 16)
+  const cands = res.landmarks.map((lm, i) => {
+    const d15 = Math.hypot(lm[0].x - norm[15].x, lm[0].y - norm[15].y);
+    const d16 = Math.hypot(lm[0].x - norm[16].x, lm[0].y - norm[16].y);
+    return { i, raw: d15 <= d16 ? 15 : 16, d: Math.min(d15, d16) };
+  }).sort((a, b) => a.d - b.d);
+  const used = new Set();
+  for (const c of cands) {
+    if (used.has(c.raw) || c.d > 0.15) continue;
+    used.add(c.raw);
+    const pIdx = settings.mirror ? SWAP[c.raw] : c.raw;
+    const H = HANDS[pIdx === 15 ? "L" : "R"];
+    const wl = res.worldLandmarks[c.i], w0 = wl[0];
+    const rel = (p, out) => out.set(sx * (p.x - w0.x), -(p.y - w0.y), -(p.z - w0.z));
+    rel(wl[17], H.toPinky);
+    rel(wl[5], H.toIndex);
+    H.grip = measureGrip(wl);
+    H.norm = res.landmarks[c.i];
+    H.t = tMs;
+  }
+}
+// after ingestPose: swap the pose model's rough hand points for the hand model's palm vectors
+function applyHands(tMs) {
+  for (const [s, wr, pk, ix] of [["L", 15, 17, 19], ["R", 16, 18, 20]]) {
+    const H = HANDS[s];
+    const fresh = settings.upper && tMs - H.t < 300;
+    if (fresh) {
+      P[pk].copy(P[wr]).add(H.toPinky);
+      P[ix].copy(P[wr]).add(H.toIndex);
+      VIS[pk] = VIS[ix] = 1;
+    }
+    gripLive[s] = fresh ? H.grip : -1;
+  }
+}
+
+/* ---------- Retargeting ---------- */
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _qp = new THREE.Quaternion(), _qt = new THREE.Quaternion();
+const DOWN = new THREE.Vector3(0, -1, 0), FWD = new THREE.Vector3(0, 0, 1);
+const HEAD_PITCH_FIX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.33);
+const VIS_MIN = 0.5;
+const SLERP = 0.55;
+
+const mid = (a, b, out) => out.addVectors(P[a], P[b]).multiplyScalar(0.5);
+const seen = (...ids) => ids.every((i) => VIS[i] > VIS_MIN);
+
+// orientation whose local +X = xDir and +Y ≈ upDir (orthonormalized)
+function basisQuat(xDir, upDir, out) {
+  const x = _v1.copy(xDir).normalize();
+  const z = _v2.crossVectors(x, upDir).normalize();
+  const y = _v3.crossVectors(z, x);
+  _m.makeBasis(x, y, z);
+  return out.setFromRotationMatrix(_m);
+}
+// rotate node (in its parent's frame) to match a world-space target orientation
+function applyWorldQuat(n, worldQ, valid) {
+  if (valid) {
+    n.parent.getWorldQuaternion(_qp).invert();
+    _qt.multiplyQuaternions(_qp, worldQ);
+  } else _qt.identity();
+  n.quaternion.slerp(_qt, SLERP);
+}
+// swing node so its rest direction points along worldDir
+function aim(n, restDir, worldDir, valid) {
+  if (valid && worldDir.lengthSq() > 1e-8) {
+    n.parent.getWorldQuaternion(_qp).invert();
+    const local = worldDir.clone().applyQuaternion(_qp).normalize();
+    _qt.setFromUnitVectors(restDir, local);
+  } else _qt.identity();
+  n.quaternion.slerp(_qt, SLERP);
+}
+
+// wrist: full hand orientation (bend + palm twist) from the wrist, index and pinky landmarks.
+// Rest pose = hand hanging down (-Y) with the index knuckle in front of the pinky (+Z).
+const HAND_VIS = 0.3;                      // hand points are less confident than body points
+const WRIST_BEND = 1.3;                    // rad (~75°) bend limit, keeps noisy hand points from snapping the wrist
+const WRIST_TWIST = 2.0;                   // rad (~115°) palm turn limit; palm-down/up is ~90° from the forearm's neutral
+const _hd = new THREE.Vector3(), _hy = new THREE.Vector3(), _hz = new THREE.Vector3(), _hx = new THREE.Vector3();
+const _qw = new THREE.Quaternion(), _qi = new THREE.Quaternion(), _qs = new THREE.Quaternion(), _qtw = new THREE.Quaternion();
+// limit a rotation's angle by slerping it toward identity
+function capAngle(q, max) {
+  if (q.w < 0) q.set(-q.x, -q.y, -q.z, -q.w);
+  const a = 2 * Math.acos(Math.min(1, q.w));
+  if (a > max) q.copy(_qi.identity().slerp(q, max / a));
+  return q;
+}
+function aimWrist(n, wr, pk, ix) {
+  let ok = [wr, pk, ix].every((i) => VIS[i] > HAND_VIS);
+  if (ok) {
+    _hd.addVectors(P[pk], P[ix]).multiplyScalar(0.5).sub(P[wr]);   // wrist -> knuckles
+    _hz.subVectors(P[ix], P[pk]);                                   // pinky -> index
+    ok = _hd.lengthSq() > 1e-6 && _hz.lengthSq() > 1e-6;
+  }
+  if (ok) {
+    _hy.copy(_hd).normalize().negate();
+    _hz.addScaledVector(_hy, -_hz.dot(_hy));
+    ok = _hz.lengthSq() > 1e-8;
+  }
+  if (!ok) { n.quaternion.slerp(_qi.identity(), SLERP * 0.5); return; }
+  _hz.normalize();
+  _hx.crossVectors(_hy, _hz);
+  _m.makeBasis(_hx, _hy, _hz);
+  _qw.setFromRotationMatrix(_m);
+  n.parent.getWorldQuaternion(_qp).invert();
+  _qt.multiplyQuaternions(_qp, _qw);
+  // swing-twist split around the hand's long axis (local Y), each limited on its own
+  _qtw.set(0, _qt.y, 0, _qt.w);
+  if (_qtw.lengthSq() < 1e-8) _qtw.identity(); else _qtw.normalize();
+  _qs.copy(_qt).multiply(_qw.copy(_qtw).invert());
+  capAngle(_qtw, WRIST_TWIST);
+  capAngle(_qs, WRIST_BEND);
+  _qt.multiplyQuaternions(_qs, _qtw);
+  n.quaternion.slerp(_qt, SLERP);
+}
+
+const hipMid = new THREE.Vector3(), shMid = new THREE.Vector3(), up = new THREE.Vector3(), tmp = new THREE.Vector3();
+const qPelvis = new THREE.Quaternion(), qChest = new THREE.Quaternion(), qHead = new THREE.Quaternion();
+
+const UP = new THREE.Vector3(0, 1, 0);
+// upper = true: only head, torso and arms follow; the robot keeps standing on its legs
+function applyPose(upper = false) {
+  mid(23, 24, hipMid);
+  mid(11, 12, shMid);
+  up.subVectors(shMid, hipMid);
+  const hipsOk = seen(23, 24) && up.lengthSq() > 1e-6;
+  const torsoOk = seen(11, 12);
+
+  // pelvis: follows the hips in full-body mode; stays upright in upper-body mode or when hips are out of frame
+  if (!upper && torsoOk && hipsOk) basisQuat(tmp.subVectors(P[23], P[24]), up, qPelvis);
+  else qPelvis.identity();
+  applyWorldQuat(J.pelvis, qPelvis, true);
+
+  // chest: shoulder line, leaning with the spine when the hips are visible
+  if (torsoOk) basisQuat(tmp.subVectors(P[11], P[12]), hipsOk ? up : UP, qChest);
+  applyWorldQuat(J.chest, qChest, torsoOk);
+
+  // head
+  const headOk = seen(0, 7, 8);
+  if (headOk) {
+    const x = _v1.subVectors(P[7], P[8]).normalize();
+    const f = mid(7, 8, _v2).negate().add(P[0]);
+    const z = f.sub(tmp.copy(x).multiplyScalar(f.dot(x))).normalize();
+    const y = _v3.crossVectors(z, x);
+    _m.makeBasis(x, y, z);
+    qHead.setFromRotationMatrix(_m).multiply(HEAD_PITCH_FIX);
+  }
+  applyWorldQuat(J.head, qHead, headOk);
+
+  // arms
+  for (const [s, sh, el, wr, pk, ix] of [["L", 11, 13, 15, 17, 19], ["R", 12, 14, 16, 18, 20]]) {
+    aim(J["shoulder" + s], DOWN, tmp.subVectors(P[el], P[sh]), seen(sh, el));
+    aim(J["elbow" + s], DOWN, tmp.subVectors(P[wr], P[el]), seen(el, wr));
+    aimWrist(J["wrist" + s], wr, pk, ix);
+  }
+  // legs (held straight in upper-body mode)
+  for (const [s, hp, kn, an, he, to] of [["L", 23, 25, 27, 29, 31], ["R", 24, 26, 28, 30, 32]]) {
+    aim(J["hip" + s], DOWN, tmp.subVectors(P[kn], P[hp]), !upper && seen(hp, kn));
+    aim(J["knee" + s], DOWN, tmp.subVectors(P[an], P[kn]), !upper && seen(kn, an));
+    aim(J["ankle" + s], FWD, tmp.subVectors(P[to], P[he]), !upper && seen(he, to));
+  }
+}
+
+// idle "breathing" pose when nobody is tracked
+const _e = new THREE.Euler();
+function idlePose(t) {
+  const set = (n, x, y, z) => { _q.setFromEuler(_e.set(x, y, z)); n.quaternion.slerp(_q, 0.06); };
+  const b = Math.sin(t * 1.6);
+  set(J.pelvis, 0, 0, 0);
+  set(J.chest, 0.02 * b, 0.08 * Math.sin(t * 0.5), 0);
+  set(J.head, 0.04 * Math.sin(t * 0.9), 0.25 * Math.sin(t * 0.45), 0);
+  set(J.shoulderL, 0, 0, 0.12 + 0.03 * b);
+  set(J.shoulderR, 0, 0, -0.12 - 0.03 * b);
+  set(J.elbowL, -0.25, 0, 0);
+  set(J.elbowR, -0.25, 0, 0);
+  for (const n of ["wristL", "wristR", "hipL", "hipR", "kneeL", "kneeR", "ankleL", "ankleR"]) set(J[n], 0, 0, 0);
+}
+
+// keep the lowest foot contact on the floor
+const _wp = new THREE.Vector3();
+function groundLock() {
+  root.updateMatrixWorld(true);
+  let minY = Infinity;
+  for (const n of ["toeL", "heelL", "toeR", "heelR"]) minY = Math.min(minY, J[n].getWorldPosition(_wp).y);
+  root.position.y -= minY * 0.35;
+}
+
+/* ---------- Pose landmarker ---------- */
+let landmarker = null, vision = null, stream = null, running = false, lastVideoTime = -1;
+let fpsCount = 0, fpsLast = performance.now(), fps = 0;
+
+async function loadLandmarker(variant) {
+  setStatus("AI 모델 불러오는 중…", "busy");
+  vision ??= await FilesetResolver.forVisionTasks(WASM_URL);
+  landmarker?.close();
+  landmarker = null;
+  const opts = (delegate) => ({
+    baseOptions: { modelAssetPath: MODEL_URL(variant), delegate },
+    runningMode: "VIDEO",
+    numPoses: 1,
+    minPoseDetectionConfidence: 0.5,
+    minPosePresenceConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  });
+  try { landmarker = await PoseLandmarker.createFromOptions(vision, opts("GPU")); }
+  catch (e) { console.warn("GPU delegate failed, using CPU", e); landmarker = await PoseLandmarker.createFromOptions(vision, opts("CPU")); }
+}
+
+async function startCamera() {
+  stopStream();
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error(window.isSecureContext ? "이 브라우저는 카메라를 지원하지 않습니다." : "insecure");
+  }
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: settings.facing, width: { ideal: 640 }, height: { ideal: 480 } },
+  });
+  video.srcObject = stream;
+  await video.play();
+  overlay.width = video.videoWidth;
+  overlay.height = video.videoHeight;
+  pipEmpty.hidden = true;
+}
+function stopStream() {
+  stream?.getTracks().forEach((t) => t.stop());
+  stream = null;
+}
+
+async function start() {
+  hideMsg();
+  btnStart.disabled = true;
+  try {
+    if (!landmarker) await loadLandmarker(settings.model);
+    setStatus("카메라 연결 중…", "busy");
+    await startCamera();
+    running = true;
+    resetFilters();
+    btnStart.textContent = "정지";
+    btnStart.classList.add("stop");
+    setStatus("사람을 찾는 중…", "lost");
+  } catch (e) {
+    console.error(e);
+    running = false;
+    setStatus("오류", "error");
+    if (e.message === "insecure") {
+      showMsg("<b>HTTPS 연결이 필요합니다.</b><br>휴대폰 브라우저는 보안 연결(https://)에서만 카메라를 열어 줍니다. 서버가 출력한 <code>https://</code> 주소로 접속하세요.");
+    } else if (e.name === "NotAllowedError") {
+      showMsg("<b>카메라 권한이 거부되었습니다.</b><br>브라우저 주소창의 사이트 설정에서 카메라를 허용한 뒤 다시 시작을 누르세요.");
+    } else {
+      showMsg(`<b>시작하지 못했습니다.</b><br>${e.message || e}`);
+    }
+  } finally {
+    btnStart.disabled = false;
+  }
+}
+function stop() {
+  recorder.finish();
+  running = false;
+  bodyOk = false;
+  okStart = 0;
+  stopStream();
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  pipEmpty.hidden = false;
+  btnStart.textContent = "시작";
+  btnStart.classList.remove("stop");
+  setStatus("대기 중", "idle");
+}
+
+function drawOverlay(lms) {
+  const w = overlay.width, h = overlay.height;
+  octx.clearRect(0, 0, w, h);
+  if (!lms) return;
+  octx.lineWidth = Math.max(2, w / 200);
+  octx.strokeStyle = bodyOk ? "#4fd1c5" : "#ef6f6c";
+  octx.beginPath();
+  for (const { start, end } of PoseLandmarker.POSE_CONNECTIONS) {
+    const a = lms[start], b = lms[end];
+    if ((a.visibility ?? 1) < VIS_MIN || (b.visibility ?? 1) < VIS_MIN) continue;
+    octx.moveTo(a.x * w, a.y * h);
+    octx.lineTo(b.x * w, b.y * h);
+  }
+  octx.stroke();
+  octx.fillStyle = "#f2a541";
+  for (const p of lms) {
+    if ((p.visibility ?? 1) < VIS_MIN) continue;
+    octx.beginPath();
+    octx.arc(p.x * w, p.y * h, Math.max(2.5, w / 150), 0, Math.PI * 2);
+    octx.fill();
+  }
+  // finger joints from the hand model (upper-body mode)
+  const now = performance.now();
+  octx.lineWidth = Math.max(1.5, w / 320);
+  octx.strokeStyle = "#ffe08a";
+  octx.fillStyle = "#ffe08a";
+  for (const H of [HANDS.L, HANDS.R]) {
+    if (!settings.upper || !H.norm || now - H.t > 300) continue;
+    octx.beginPath();
+    for (const { start, end } of HandLandmarker.HAND_CONNECTIONS) {
+      octx.moveTo(H.norm[start].x * w, H.norm[start].y * h);
+      octx.lineTo(H.norm[end].x * w, H.norm[end].y * h);
+    }
+    octx.stroke();
+    for (const p of H.norm) { octx.beginPath(); octx.arc(p.x * w, p.y * h, Math.max(1.5, w / 260), 0, Math.PI * 2); octx.fill(); }
+  }
+}
+
+/* ---------- Full-body framing check ---------- */
+// The robot only mirrors the person while head, hips, knees and feet are all inside the camera frame.
+const EDGE = 0.02;
+const inFrame = (p) => p.x > EDGE && p.x < 1 - EDGE && p.y > EDGE && p.y < 1 - EDGE;
+const visible = (norm, i) => (norm[i].visibility ?? 1) > VIS_MIN && inFrame(norm[i]);
+const GUIDE = {
+  none: ["카메라 앞에 서 주세요", "몸 전체가 화면에 들어오도록 휴대폰에서 2~3m 떨어져 서 주세요."],
+  close: ["너무 가까워요", "몸 전체가 보이도록 뒤로 몇 걸음 물러나 주세요."],
+  feet: ["발이 보이지 않아요", "조금 더 뒤로 물러나거나 휴대폰을 낮게 두어 발까지 보이게 해 주세요."],
+  head: ["머리가 잘렸어요", "뒤로 물러나거나 휴대폰을 조금 위로 향하게 해 주세요."],
+  side: ["화면 밖으로 벗어났어요", "화면 가운데로 이동해 주세요."],
+  upperNone: ["카메라 앞에 앉거나 서 주세요", "머리와 어깨, 팔이 화면에 들어오도록 자리를 잡아 주세요."],
+  shoulders: ["어깨가 보이지 않아요", "휴대폰에서 조금 떨어져 머리와 양쪽 어깨가 모두 보이게 해 주세요."],
+};
+function checkFraming(norm) {
+  if (settings.upper) {
+    // upper-body mode: head and both shoulders must be in frame; legs are ignored
+    if ([0, 11, 12].some((i) => norm[i].x < EDGE || norm[i].x > 1 - EDGE)) return "side";
+    if (!visible(norm, 0)) return "head";
+    if (![11, 12].every((i) => visible(norm, i))) return "shoulders";
+    return null;
+  }
+  const sideOut = [0, 11, 12, 15, 16, 23, 24, 27, 28].some((i) => norm[i].x < EDGE || norm[i].x > 1 - EDGE);
+  const headOk = visible(norm, 0);
+  const lowerOk = [23, 24, 25, 26, 27, 28].every((i) => visible(norm, i));
+  if (!headOk && !lowerOk) return "close";
+  if (sideOut) return "side";
+  if (!lowerOk) return "feet";
+  if (!headOk || ![11, 12].every((i) => visible(norm, i))) return "head";
+  return null;
+}
+
+let bodyOk = false, okStart = 0, badStart = 0, guideKey = "none";
+const guideEl = $("guide");
+function updateFraming(problem, now) {
+  if (!problem) {
+    badStart = 0;
+    okStart ||= now;
+    if (now - okStart > 300) bodyOk = true;     // stay in frame briefly before the robot resumes
+  } else {
+    okStart = 0;
+    badStart ||= now;
+    if (now - badStart > 250) { bodyOk = false; guideKey = problem; }
+  }
+}
+function renderGuide(now) {
+  const lost = now - poseTime > 500;
+  const show = running && !player.clip && (lost || !bodyOk);
+  guideEl.hidden = !show;
+  if (!show) return;
+  const key = lost ? (settings.upper ? "upperNone" : "none") : guideKey;
+  const sig = key + settings.upper;
+  if (guideEl.dataset.key !== sig) {
+    guideEl.dataset.key = sig;
+    const [title, hint] = GUIDE[key];
+    $("guideTitle").textContent = title;
+    $("guideHint").textContent = hint;
+    $("guideFoot").textContent = settings.upper
+      ? "머리와 어깨가 보이면 로봇이 다시 따라 움직입니다"
+      : "몸 전체가 보이면 로봇이 다시 따라 움직입니다";
+  }
+}
+
+function handlePose(world, norm, now, hands = null) {
+  if (player.clip) { drawOverlay(norm); return; }   // playback owns the robot; ignore the live camera
+  ingestPose(world, norm, now);
+  if (hands) ingestHands(hands, norm, now);
+  applyHands(now);
+  updateFraming(checkFraming(norm), now);
+  drawOverlay(norm);
+  recorder.capture(now);
+}
+
+/* ---------- Motion recorder ---------- */
+// A clip stores the filtered landmarks (not robot joint angles), so it can be replayed on any robot.
+// Frame layout: [t(ms), ok(0/1), rootX, x0,y0,z0 … x32,y32,z32, vis0 … vis32, gripL, gripR]
+// (clips made before finger tracking have no grip values: 135 numbers per frame)
+const MAX_REC_MS = 3 * 60 * 1000;
+const round3 = (v) => Math.round(v * 1000) / 1000;
+const fmtTime = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+const recorder = {
+  active: false, start: 0, frames: [], upper: false,
+  begin(now) {
+    Object.assign(this, { active: true, start: now, frames: [], upper: settings.upper });
+    renderRecButton(now);
+  },
+  capture(now) {
+    if (!this.active) return;
+    const t = now - this.start;
+    const f = [Math.round(t), bodyOk ? 1 : 0, round3(rootXTarget)];
+    for (let i = 0; i < 33; i++) f.push(round3(P[i].x), round3(P[i].y), round3(P[i].z));
+    for (let i = 0; i < 33; i++) f.push(Math.round(VIS[i] * 100) / 100);
+    f.push(Math.round(gripLive.L * 100) / 100, Math.round(gripLive.R * 100) / 100);   // claw grip, -1 = none
+    this.frames.push(f);
+    if (t > MAX_REC_MS) this.finish();
+  },
+  finish() {
+    if (!this.active) return;
+    this.active = false;
+    renderRecButton();
+    const usable = this.frames.filter((f) => f[1]).length;
+    if (this.frames.length < 10 || usable === 0) {
+      showMsg("<b>녹화된 동작이 없습니다.</b><br>몸이 화면에 제대로 보이는 상태(뼈대가 청록색)에서 녹화해 주세요.");
+      return;
+    }
+    const d = new Date();
+    const clip = {
+      id: String(Date.now()),
+      name: `동작 ${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`,
+      created: d.toISOString(),
+      duration: this.frames.at(-1)[0],
+      upper: this.upper,
+      frames: this.frames,
+    };
+    clips.unshift(clip);
+    saveClips();
+    renderClips();
+    openSheet("clips");
+  },
+};
+function renderRecButton(now = performance.now()) {
+  const btn = $("btnRec");
+  btn.classList.toggle("recording", recorder.active);
+  $("recLabel").textContent = recorder.active ? `정지 ${fmtTime(now - recorder.start)}` : "녹화";
+  btn.title = recorder.active ? "녹화 정지" : "동작 녹화";
+}
+
+/* ---------- Clip storage (this browser only) ---------- */
+const CLIPS_KEY = "motion-mirror-clips";
+let clips = [];
+try { clips = JSON.parse(localStorage.getItem(CLIPS_KEY) || "[]"); } catch { clips = []; }
+function saveClips() {
+  try { localStorage.setItem(CLIPS_KEY, JSON.stringify(clips)); }
+  catch {
+    showMsg("<b>저장 공간이 부족합니다.</b><br>방금 녹화는 이 화면을 닫기 전까지만 남아 있어요. 오래된 녹화를 지우거나 <b>파일로 저장</b>해 두세요.");
+  }
+}
+function validClip(c) {
+  return c && typeof c.name === "string" && Array.isArray(c.frames) && c.frames.length > 1 &&
+    c.frames.every((f) => Array.isArray(f) && (f.length === 135 || f.length === 137) && f.every(Number.isFinite));
+}
+
+/* ---------- Playback ---------- */
+const player = {
+  clip: null, pos: 0, playing: false, loop: true, idx: 0, last: 0, grip: { L: -1, R: -1 },
+  open(clip) {
+    if (recorder.active) recorder.finish();
+    if (exporter.active) exporter.stop(true);
+    Object.assign(this, { clip, pos: 0, idx: 0, playing: true, last: performance.now() });
+    resetFilters();
+    $("player").hidden = false;
+    $("playName").textContent = clip.name;
+    closeSheets();
+    renderPlayer();
+    renderClips();
+  },
+  close() {
+    if (exporter.active) exporter.stop(true);
+    this.clip = null;
+    this.playing = false;
+    $("player").hidden = true;
+    poseTime = -1e9;                       // live tracking must re-acquire before the robot follows again
+    bodyOk = false; okStart = 0;
+    renderClips();
+  },
+  toggle() {
+    if (!this.clip) return;
+    if (!this.playing && this.pos >= this.clip.duration) this.seek(0);
+    this.playing = !this.playing;
+    this.last = performance.now();
+    renderPlayer();
+  },
+  seek(ms) {
+    this.pos = THREE.MathUtils.clamp(ms, 0, this.clip.duration);
+    this.idx = 0;
+    renderPlayer();
+  },
+  // advance time and load the interpolated frame into P / VIS; returns whether the robot should follow
+  update(now) {
+    const c = this.clip, fr = c.frames;
+    if (this.playing) {
+      this.pos += now - this.last;
+      if (this.pos >= c.duration) {
+        if (this.loop) this.pos %= Math.max(c.duration, 1);
+        else { this.pos = c.duration; this.playing = false; }
+        this.idx = 0;
+      }
+    }
+    this.last = now;
+    while (this.idx < fr.length - 2 && fr[this.idx + 1][0] <= this.pos) this.idx++;
+    while (this.idx > 0 && fr[this.idx][0] > this.pos) this.idx--;
+    const a = fr[this.idx], b = fr[Math.min(this.idx + 1, fr.length - 1)];
+    const span = b[0] - a[0];
+    const k = span > 0 ? THREE.MathUtils.clamp((this.pos - a[0]) / span, 0, 1) : 0;
+    const lerp = (j) => a[j] + (b[j] - a[j]) * k;
+    for (let i = 0; i < 33; i++) {
+      P[i].set(lerp(3 + i * 3), lerp(4 + i * 3), lerp(5 + i * 3));
+      VIS[i] = (k < 0.5 ? a : b)[102 + i];
+    }
+    rootXTarget = lerp(2);
+    const near = k < 0.5 ? a : b;
+    this.grip.L = near.length > 135 ? near[135] : -1;
+    this.grip.R = near.length > 135 ? near[136] : -1;
+    return near[1] === 1;
+  },
+};
+let lastPlayerUi = 0;
+function renderPlayer() {
+  const c = player.clip;
+  if (!c) return;
+  $("btnPlay").textContent = player.playing ? "❚❚" : "▶";
+  $("btnPlay").setAttribute("aria-label", player.playing ? "일시정지" : "재생");
+  $("playTime").textContent = `${fmtTime(player.pos)} / ${fmtTime(c.duration)}`;
+  if (!seeking) $("seek").value = String(Math.round((player.pos / Math.max(c.duration, 1)) * 1000));
+}
+let seeking = false;
+
+/* ---------- Video export: replay a clip and record the 3D view ---------- */
+const VIDEO_TYPES = ["video/mp4;codecs=avc1.42E01E", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+const exporter = {
+  active: false, canceled: false, started: false, startAt: 0, endAt: 0,
+  rec: null, chunks: [], canvas: null, ctx: null, clip: null, prevLoop: true, url: null, file: null,
+  supported() {
+    return typeof MediaRecorder !== "undefined" && typeof HTMLCanvasElement.prototype.captureStream === "function";
+  },
+  begin(clip) {
+    if (this.active) return;
+    if (!this.supported()) {
+      showMsg("<b>이 브라우저는 영상 저장을 지원하지 않습니다.</b><br>최신 Chrome이나 Safari(iOS 14.3 이상)에서 열어 주세요.");
+      return;
+    }
+    this.clearResult();
+    player.open(clip);                         // also stops any live recording and closes the sheet
+    this.prevLoop = player.loop;
+    player.loop = false;
+    player.playing = false;                    // hold the first pose briefly so the robot settles before it moves
+    player.seek(0);
+    $("player").hidden = true;
+
+    // fixed-size copy of the 3D view, long side ≤ 1280px, even dimensions for the encoder
+    const src = renderer.domElement;
+    const s = Math.min(1, 1280 / Math.max(src.width, src.height));
+    const even = (v) => Math.max(2, Math.round((v * s) / 2) * 2);
+    this.canvas = document.createElement("canvas");
+    this.canvas.width = even(src.width);
+    this.canvas.height = even(src.height);
+    this.ctx = this.canvas.getContext("2d");
+
+    const mimeType = VIDEO_TYPES.find((t) => MediaRecorder.isTypeSupported(t));
+    try {
+      this.rec = new MediaRecorder(this.canvas.captureStream(30), { ...(mimeType && { mimeType }), videoBitsPerSecond: 6_000_000 });
+    } catch (e) {
+      showMsg(`<b>영상 녹화를 시작하지 못했습니다.</b><br>${e.message || e}`);
+      player.loop = this.prevLoop;
+      player.close();
+      return;
+    }
+    this.chunks = [];
+    this.rec.ondataavailable = (e) => { if (e.data.size) this.chunks.push(e.data); };
+    this.rec.onstop = () => this.finish();
+    Object.assign(this, { clip, active: true, canceled: false, started: false, endAt: 0, startAt: performance.now() + 600 });
+    this.draw();
+    this.rec.start(1000);
+
+    $("expTitle").textContent = "영상 만드는 중…";
+    $("expNote").textContent = "재생이 끝날 때까지 이 화면을 켜 두세요. 드래그로 시점을 바꾸면 영상에도 그대로 담깁니다.";
+    $("expDot").hidden = false;
+    $("expBarWrap").hidden = false;
+    $("expBar").style.width = "0%";
+    $("expCancel").textContent = "취소";
+    $("exporter").hidden = false;
+    setStatus("영상 만드는 중", "track");
+  },
+  // called every frame right after renderer.render()
+  tick(now) {
+    if (!this.active) return;
+    if (!this.started && now >= this.startAt) {
+      this.started = true;
+      player.playing = true;
+      player.last = now;
+    }
+    this.draw();
+    $("expBar").style.width = `${Math.round((player.pos / Math.max(this.clip.duration, 1)) * 100)}%`;
+    if (this.started && !player.playing && !this.endAt) this.endAt = now + 600;   // short tail after the last pose
+    if (this.endAt && now >= this.endAt) this.stop(false);
+  },
+  draw() {
+    const { ctx, canvas } = this, w = canvas.width, h = canvas.height;
+    ctx.drawImage(renderer.domElement, 0, 0, w, h);
+    const fs = Math.round(Math.max(12, Math.min(w, h) * 0.032)), pad = Math.round(fs * 0.9);
+    ctx.font = `600 ${fs}px "IBM Plex Sans KR", "Space Grotesk", sans-serif`;
+    ctx.textBaseline = "bottom";
+    ctx.shadowColor = "rgba(0,0,0,0.6)";
+    ctx.shadowBlur = fs * 0.4;
+    ctx.fillStyle = "rgba(237,242,244,0.92)";
+    ctx.fillText(`${ROBOTS[robot.id].name} · ${this.clip.name}`, pad, h - pad);
+    ctx.font = `600 ${Math.round(fs * 0.7)}px "Space Grotesk", sans-serif`;
+    ctx.fillStyle = "rgba(242,165,65,0.95)";
+    ctx.fillText("MOTION MIRROR", pad, h - pad - fs * 1.3);
+    ctx.shadowBlur = 0;
+  },
+  stop(cancel) {
+    if (!this.active) return;
+    this.active = false;
+    this.canceled = cancel;
+    player.loop = this.prevLoop;
+    if (player.clip) { player.playing = false; $("player").hidden = false; renderPlayer(); }
+    if (this.rec && this.rec.state !== "inactive") this.rec.stop();
+    else this.finish();
+    if (cancel) $("exporter").hidden = true;
+    setStatus(player.clip ? "녹화 재생 중" : running ? "사람을 찾는 중…" : "대기 중", player.clip ? "track" : running ? "lost" : "idle");
+  },
+  finish() {
+    const rec = this.rec;
+    this.rec = null;
+    if (this.canceled || !this.chunks.length) {
+      if (!this.canceled) showMsg("<b>영상을 만들지 못했습니다.</b><br>다시 시도해 주세요.");
+      $("exporter").hidden = true;
+      return;
+    }
+    const type = (rec?.mimeType || this.chunks[0].type || "video/webm").split(";")[0];
+    const ext = type.includes("mp4") ? "mp4" : "webm";
+    const blob = new Blob(this.chunks, { type });
+    this.chunks = [];
+    const base = `${this.clip.name}_${ROBOTS[robot.id].name}`.replace(/[\\/:*?"<>|\s]+/g, "_");
+    this.file = new File([blob], `${base}.${ext}`, { type });
+    this.url = URL.createObjectURL(blob);
+
+    const mb = (blob.size / 1048576).toFixed(1);
+    $("expTitle").textContent = "영상이 준비됐습니다";
+    $("expNote").textContent = `${ext.toUpperCase()} · ${mb}MB · ${fmtTime(this.clip.duration)}`;
+    $("expDot").hidden = true;
+    $("expBarWrap").hidden = true;
+    const pv = $("expPreview");
+    pv.src = this.url;
+    pv.hidden = false;
+    $("expSave").hidden = false;
+    $("expShare").hidden = !(navigator.canShare && navigator.canShare({ files: [this.file] }));
+    $("expCancel").textContent = "닫기";
+    $("exporter").hidden = false;
+  },
+  save() {
+    if (!this.url) return;
+    const a = document.createElement("a");
+    a.href = this.url;
+    a.download = this.file.name;
+    document.body.append(a);
+    a.click();
+    a.remove();
+  },
+  async share() {
+    if (!this.file) return;
+    try { await navigator.share({ files: [this.file], title: this.file.name }); }
+    catch (e) { if (e.name !== "AbortError") this.save(); }
+  },
+  clearResult() {
+    const pv = $("expPreview");
+    pv.pause();
+    pv.removeAttribute("src");
+    pv.load();
+    pv.hidden = true;
+    $("expSave").hidden = true;
+    $("expShare").hidden = true;
+    if (this.url) URL.revokeObjectURL(this.url);
+    this.url = null;
+    this.file = null;
+  },
+};
+$("expSave").addEventListener("click", () => exporter.save());
+$("expShare").addEventListener("click", () => exporter.share());
+$("expCancel").addEventListener("click", () => {
+  if (exporter.active) exporter.stop(true);
+  else { exporter.clearResult(); $("exporter").hidden = true; }
+});
+
+function detect(now) {
+  if (!running || !landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  const res = landmarker.detectForVideo(video, now);
+  fpsCount++;
+  if (now - fpsLast > 1000) { fps = Math.round((fpsCount * 1000) / (now - fpsLast)); fpsCount = 0; fpsLast = now; }
+  if (res.worldLandmarks?.length) {
+    // fingers only in upper-body mode (hands are big enough there); every other frame to spare the phone
+    let hands = null;
+    if (settings.upper && !player.clip) {
+      if (!handLm) ensureHandLandmarker();
+      else if ((++handFrame & 1) === 0) hands = handLm.detectForVideo(video, now);
+    }
+    handlePose(res.worldLandmarks[0], res.landmarks[0], now, hands);
+    if (player.clip) setStatus("녹화 재생 중", "track");
+    else if (bodyOk) setStatus(`${recorder.active ? "녹화 중" : "추적 중"} · ${fps} fps`, "track");
+    else setStatus(settings.upper ? "상반신이 보이지 않음" : "전신이 보이지 않음", "lost");
+  } else {
+    drawOverlay(null);
+    if (now - poseTime > 500) { resetFilters(); bodyOk = false; okStart = 0; setStatus("사람이 보이지 않습니다", "lost"); }
+  }
+}
+
+/* ---------- Main loop ---------- */
+const clock = new THREE.Clock();
+function frame() {
+  requestAnimationFrame(frame);
+  const now = performance.now();
+  detect(now);
+  let tracking, upper;
+  if (player.clip) {
+    tracking = player.update(now);
+    upper = player.clip.upper;
+    if (now - lastPlayerUi > 200) { renderPlayer(); lastPlayerUi = now; }
+  } else {
+    tracking = running && now - poseTime < 500 && bodyOk;
+    upper = settings.upper;
+    if (recorder.active && now - lastPlayerUi > 500) { renderRecButton(now); lastPlayerUi = now; }
+  }
+  if (tracking) applyPose(upper); else idlePose(clock.getElapsedTime());
+  // claw fingers: live grip, recorded grip during playback, otherwise relaxed
+  const gripSrc = player.clip ? player.grip : tracking ? gripLive : null;
+  for (const s of ["L", "R"]) {
+    const g = gripSrc && gripSrc[s] >= 0 ? gripSrc[s] : REST_GRIP;
+    gripNow[s] += (g - gripNow[s]) * 0.3;
+    setClaw(J["claw" + s], gripNow[s]);
+  }
+  renderGuide(now);
+  const tx = tracking && settings.follow ? THREE.MathUtils.clamp(rootXTarget, -2, 2) : 0;
+  root.position.x += (tx - root.position.x) * 0.15;
+  groundLock();
+  controls.update();
+  renderer.render(scene, camera);
+  exporter.tick(now);                    // must run right after render so the WebGL frame is still readable
+}
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+function frameCamera() {
+  const portrait = innerWidth < innerHeight;
+  const k = robot.D.hipH / 0.95;
+  controls.target.set(0, robot.D.hipH, 0);
+  camera.position.set(0.9 * k, 1.35 * k, (portrait ? 5.2 : 3.6) * Math.max(k, 0.75));
+}
+function renderRobotPicker() {
+  const nav = $("robots");
+  nav.replaceChildren(...Object.entries(ROBOTS).map(([id, r]) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.id = "robot-" + id;
+    b.className = "robot-chip";
+    b.setAttribute("aria-pressed", String(id === robot.id));
+    b.style.setProperty("--swatch", r.swatch);
+    b.innerHTML = `<span class="dot"></span><span class="label"><b></b><small></small></span>`;
+    b.querySelector("b").textContent = r.name;
+    b.querySelector("small").textContent = r.desc;
+    b.addEventListener("click", () => setRobot(id));
+    return b;
+  }));
+}
+renderRobotPicker();
+addEventListener("resize", resize);
+resize();
+frameCamera();
+frame();
+
+/* ---------- Controls ---------- */
+btnStart.addEventListener("click", () => (running ? stop() : start()));
+btnFlip.addEventListener("click", async () => {
+  settings.facing = settings.facing === "user" ? "environment" : "user";
+  // front camera feels natural mirrored, rear camera natural unmirrored
+  setMirror(settings.facing === "user");
+  if (running) {
+    try { await startCamera(); resetFilters(); }
+    catch (e) { showMsg(`<b>카메라를 전환하지 못했습니다.</b><br>${e.message || e}`); }
+  }
+});
+function setMirror(on) {
+  settings.mirror = on;
+  btnMirror.setAttribute("aria-pressed", String(on));
+  pip.classList.toggle("mirrored", on);
+  resetFilters();
+}
+btnMirror.addEventListener("click", () => setMirror(!settings.mirror));
+btnMove.addEventListener("click", () => {
+  settings.follow = !settings.follow;
+  btnMove.setAttribute("aria-pressed", String(settings.follow));
+});
+selModel.addEventListener("change", async () => {
+  settings.model = selModel.value;
+  if (!landmarker) return;
+  const wasRunning = running;
+  running = false;
+  try { await loadLandmarker(settings.model); }
+  catch (e) { showMsg(`<b>모델을 불러오지 못했습니다.</b><br>${e.message || e}`); }
+  running = wasRunning && !!stream;
+  setStatus(running ? "사람을 찾는 중…" : "대기 중", running ? "lost" : "idle");
+});
+msgEl.addEventListener("click", hideMsg);
+
+/* ---------- Sheets (settings / clips) ---------- */
+const SHEETS = { settings: $("btnSettings"), clips: $("btnClips") };
+function closeSheets() {
+  for (const [id, btn] of Object.entries(SHEETS)) { $(id).hidden = true; btn.setAttribute("aria-expanded", "false"); }
+}
+function openSheet(id) {
+  const wasOpen = !$(id).hidden;
+  closeSheets();
+  if (wasOpen) return;
+  $(id).hidden = false;
+  SHEETS[id].setAttribute("aria-expanded", "true");
+}
+for (const id of Object.keys(SHEETS)) SHEETS[id].addEventListener("click", () => openSheet(id));
+addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheets(); });
+
+const btnUpper = $("btnUpper");
+btnUpper.addEventListener("click", () => {
+  settings.upper = !settings.upper;
+  btnUpper.setAttribute("aria-pressed", String(settings.upper));
+  bodyOk = false; okStart = 0; badStart = 0;
+  resetFilters();
+  try { localStorage.setItem("motion-mirror-upper", settings.upper ? "1" : "0"); } catch {}
+});
+try {
+  if (localStorage.getItem("motion-mirror-upper") === "1") { settings.upper = true; btnUpper.setAttribute("aria-pressed", "true"); }
+} catch {}
+
+/* ---------- Record button ---------- */
+$("btnRec").addEventListener("click", async () => {
+  if (recorder.active) { recorder.finish(); return; }
+  if (player.clip) player.close();
+  if (!running) await start();
+  if (running) recorder.begin(performance.now());
+});
+
+/* ---------- Clip list ---------- */
+function renderClips() {
+  $("clipCount").textContent = String(clips.length);
+  $("clipEmpty").hidden = clips.length > 0;
+  $("clipList").replaceChildren(...clips.map((c) => {
+    const li = document.createElement("li");
+    li.classList.toggle("playing", player.clip?.id === c.id);
+    li.innerHTML = `<div class="info"><b></b><small></small></div>
+      <div class="acts"><button type="button" class="play">재생</button><button type="button" class="video">영상</button><button type="button" class="save">파일</button><button type="button" class="del">삭제</button></div>`;
+    li.querySelector("b").textContent = c.name;
+    li.querySelector("small").textContent = `${fmtTime(c.duration)} · ${c.upper ? "상반신" : "전신"}`;
+    li.querySelector(".play").addEventListener("click", () => player.open(c));
+    li.querySelector(".save").addEventListener("click", () => exportClip(c));
+    li.querySelector(".video").addEventListener("click", () => exporter.begin(c));
+    li.querySelector(".video").title = "로봇이 움직이는 모습을 영상 파일로 저장";
+    li.querySelector(".save").title = "동작 데이터(.json)로 저장 · 다른 기기에서 불러오기용";
+    const del = li.querySelector(".del");
+    del.addEventListener("click", () => {
+      if (del.dataset.armed) {                // second tap confirms
+        if (player.clip?.id === c.id) player.close();
+        clips = clips.filter((x) => x.id !== c.id);
+        saveClips();
+        renderClips();
+      } else {
+        del.dataset.armed = "1";
+        del.textContent = "정말 삭제?";
+        del.style.borderColor = "var(--warn)";
+        del.style.color = "var(--warn)";
+        setTimeout(() => { if (del.isConnected) { delete del.dataset.armed; del.textContent = "삭제"; del.style.cssText = ""; } }, 3000);
+      }
+    });
+    return li;
+  }));
+}
+function exportClip(c) {
+  const blob = new Blob([JSON.stringify({ format: "motion-mirror-clip", version: 1, ...c })], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${c.name.replace(/[\\/:*?"<>|\s]+/g, "_")}.json`;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+$("btnImport").addEventListener("click", () => $("fileImport").click());
+$("fileImport").addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = "";
+  if (!file) return;
+  try {
+    const c = JSON.parse(await file.text());
+    if (!validClip(c)) throw new Error("bad");
+    const clip = {
+      id: String(Date.now()), name: c.name.slice(0, 60), created: c.created || new Date().toISOString(),
+      duration: c.frames.at(-1)[0], upper: !!c.upper, frames: c.frames,
+    };
+    clips.unshift(clip);
+    saveClips();
+    renderClips();
+  } catch {
+    showMsg("<b>불러올 수 없는 파일입니다.</b><br>이 앱에서 <b>파일로 저장</b>한 녹화 파일(.json)을 선택해 주세요.");
+  }
+});
+renderClips();
+
+/* ---------- Player controls ---------- */
+$("btnPlay").addEventListener("click", () => player.toggle());
+$("btnClosePlayer").addEventListener("click", () => player.close());
+$("btnLoop").addEventListener("click", (e) => {
+  player.loop = !player.loop;
+  e.currentTarget.setAttribute("aria-pressed", String(player.loop));
+});
+const seekEl = $("seek");
+seekEl.addEventListener("input", () => {
+  seeking = true;
+  if (player.clip) player.seek((Number(seekEl.value) / 1000) * player.clip.duration);
+});
+seekEl.addEventListener("change", () => (seeking = false));
+
+/* ---------- 휴대폰 접속 QR (PC에서 열었을 때) ---------- */
+const connectEl = $("connect"), btnPhone = $("btnPhone"), connectUrlEl = $("connectUrl"), connectNote = $("connectNote");
+let phoneUrl = null, qr = null, autoShown = false;
+function showConnect() {
+  if (!phoneUrl) return;
+  connectUrlEl.textContent = phoneUrl;
+  const u = new URL(phoneUrl);
+  connectNote.textContent = u.protocol === "https:" && !u.port
+    ? "Wi-Fi든 LTE든 상관없이 열립니다."
+    : "같은 Wi-Fi에서만 열리며, 보안 경고가 나오면 [고급] → [계속]을 누르세요.";
+  const qrEl = $("qr");
+  qrEl.innerHTML = "";
+  if (window.QRCode) qr = new QRCode(qrEl, { text: phoneUrl, width: 200, height: 200, colorDark: "#0e1418", colorLight: "#ffffff" });
+  else qrEl.hidden = true;
+  connectEl.hidden = false;
+}
+async function findPhoneUrl() {
+  const isLocal = ["localhost", "127.0.0.1"].includes(location.hostname);
+  for (let i = 0; i < 40; i++) {
+    try {
+      const r = await fetch("/api/urls", { cache: "no-store" });
+      if (!r.ok) return;
+      const u = await r.json();
+      const url = u.public || (i >= 15 ? u.lan[0] : null); // 터널을 15초 기다린 뒤 같은 Wi-Fi 주소로 대체
+      if (url) {
+        phoneUrl = url;
+        btnPhone.hidden = !isLocal;
+        if (isLocal && matchMedia("(pointer: fine)").matches && (u.public || !autoShown)) { showConnect(); autoShown = true; }
+        if (u.public || i >= 39) return;
+      }
+    } catch { return; }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+btnPhone.addEventListener("click", showConnect);
+// keep the camera preview just above the control dock, however many rows it wraps to
+const dockEl = $("dock");
+new ResizeObserver(() => {
+  pip.style.bottom = `${dockEl.offsetHeight + 8}px`;
+  document.documentElement.style.setProperty("--dock-h", `${dockEl.offsetHeight}px`);
+}).observe(dockEl);
+$("btnCloseConnect").addEventListener("click", () => (connectEl.hidden = true));
+$("btnCopy").addEventListener("click", async (e) => {
+  try { await navigator.clipboard.writeText(phoneUrl); e.target.textContent = "복사됨"; }
+  catch { getSelection().selectAllChildren(connectUrlEl); }
+  setTimeout(() => (e.target.textContent = "주소 복사"), 1500);
+});
+// hosted on a public HTTPS site (e.g. GitHub Pages): the phone can open this very address
+const isHosted = location.protocol === "https:" && !location.port && !location.hostname.endsWith("trycloudflare.com");
+if (isHosted) {
+  phoneUrl = location.origin + location.pathname;
+  btnPhone.hidden = !matchMedia("(pointer: fine)").matches;   // only useful on a desktop
+} else if (!location.hostname.endsWith("trycloudflare.com")) findPhoneUrl();
+
+// 개발용: 주소 끝에 #debug 를 붙이면 콘솔에서 가짜 포즈를 넣어 볼 수 있음
+if (location.hash === "#debug") {
+  window.__feedPose = (world, norm = world, hands = null) => { running = true; handlePose(world, norm, performance.now(), hands); };
+  window.__grip = () => ({ ...gripNow });
+  window.__lookAt = (joint, dist = 0.45, dir = [0.25, 0.12, 1]) => {   // move the camera close to a joint
+    const p = J[joint].getWorldPosition(new THREE.Vector3());
+    controls.target.copy(p);
+    camera.position.copy(p).add(new THREE.Vector3(...dir).normalize().multiplyScalar(dist));
+  };
+  window.__joint = (name) => J[name].quaternion.toArray().map((v) => +v.toFixed(3));
+}
+
+if (!window.isSecureContext) {
+  showMsg("<b>HTTPS 연결이 필요합니다.</b><br>지금은 보안 연결이 아니라서 카메라를 쓸 수 없습니다. PC에서는 <code>http://localhost:8080</code>, 휴대폰에서는 서버가 출력한 <code>https://</code> 주소로 접속하세요.");
+}
+</script>
+</body>
+</html>
