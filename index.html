@@ -268,6 +268,7 @@
     <button id="btnRec" type="button" title="동작 녹화"><span class="rec-dot"></span><span id="recLabel">녹화</span></button>
     <button id="btnClips" type="button" aria-expanded="false" aria-controls="clips">녹화 목록 <span id="clipCount" class="count">0</span></button>
     <button id="btnSettings" type="button" aria-expanded="false" aria-controls="settings">설정</button>
+    <a id="btnGame" class="linkbtn" href="./game.html">리듬 게임</a>
     <a id="btnHelp" class="linkbtn" href="./guide.html" target="_blank" rel="noopener">도움말</a>
     <span class="spacer"></span>
     <span class="hint">드래그로 시점 회전 · 휠/핀치로 확대</span>
@@ -812,6 +813,78 @@ const ROBOTS = {
         J["knee" + s].add(mesh(new THREE.BoxGeometry(0.15, D.shin * 0.85, 0.17), armor, 0, -D.shin / 2, 0));
         J["ankle" + s].add(mesh(new THREE.SphereGeometry(0.06, 12, 10), joint));
         J["ankle" + s].add(mesh(new THREE.BoxGeometry(0.17, 0.08, 0.34), steel, 0, -0.05, 0.06));
+      }
+    },
+  },
+
+  retro: {
+    name: "레트로", desc: "50년대 SF 깡통 로봇", swatch: "#c8ccd0",
+    dims: {
+      hipH: 0.94, chestY: 0.12, neckY: 0.46, headY: 0.05,
+      shoulderX: 0.24, shoulderY: 0.35, upperArm: 0.28, foreArm: 0.27, hand: 0.11,
+      hipX: 0.11, hipY: -0.06, thigh: 0.42, shin: 0.41,
+      footDrop: 0.085, toeZ: 0.19, heelZ: 0.08,
+    },
+    dress(J, D) {
+      // polished tin plate, darker pressed-steel joints, toy-red trim and warm bulb lights
+      const tin = std(0xc8ccd0, 0.28, 0.9), dark = std(0x6f767c, 0.4, 0.85);
+      const red = std(0xc8372d, 0.35, 0.3), black = std(0x1b1d1f, 0.5, 0.3);
+      const bulb = glow(0xffd36b, 1.8), eye = glow(0xfff2b0, 2.2), alarm = glow(0xff4a3a, 2.0);
+      const disc = (r, h, mat, x, y, z) => mesh(new THREE.CylinderGeometry(r, r, h, 24), mat, x, y, z).rotateX(Math.PI / 2);
+      const rivet = (parent, x, y, z) => parent.add(ball(0.007, dark, x, y, z, 1, 1, 1, 8));
+      // accordion (flex-hose) limb hanging down local -Y
+      const ribs = (parent, len, r, mat) => {
+        parent.add(mesh(new THREE.CylinderGeometry(r * 0.72, r * 0.72, len, 14), dark, 0, -len / 2, 0));
+        const n = Math.max(3, Math.round(len / 0.036));
+        for (let i = 0; i < n; i++) {
+          const y = -len * (i + 0.5) / n;
+          parent.add(mesh(new THREE.TorusGeometry(r * 0.78, r * 0.24, 8, 20), mat, 0, y, 0).rotateX(Math.PI / 2));
+        }
+      };
+      // pelvis with red belt
+      J.pelvis.add(rbox(0.3, 0.12, 0.2, 0.03, tin, 0, -0.02, 0));
+      J.pelvis.add(rbox(0.306, 0.03, 0.206, 0.01, red, 0, 0.03, 0));
+      // waist + boxy torso with control panel, dials and rivets
+      J.chest.add(mesh(new THREE.CylinderGeometry(0.09, 0.11, 0.14, 20), dark, 0, 0.04, 0));
+      J.chest.add(rbox(0.36, 0.32, 0.24, 0.025, tin, 0, 0.27, 0));
+      J.chest.add(rbox(0.2, 0.15, 0.02, 0.006, black, 0, 0.28, 0.12));
+      J.chest.add(disc(0.026, 0.012, tin, -0.05, 0.3, 0.132));
+      J.chest.add(disc(0.026, 0.012, tin, 0.05, 0.3, 0.132));
+      J.chest.add(rbox(0.004, 0.02, 0.004, 0.001, red, -0.05, 0.305, 0.14).rotateZ(0.6));
+      J.chest.add(rbox(0.004, 0.02, 0.004, 0.001, red, 0.05, 0.305, 0.14).rotateZ(-0.4));
+      for (const [x, m] of [[-0.06, bulb], [0, alarm], [0.06, bulb]]) J.chest.add(ball(0.011, m, x, 0.24, 0.132, 1, 1, 1, 12));
+      for (const sx of [1, -1]) for (const y of [0.14, 0.4]) rivet(J.chest, sx * 0.155, y, 0.121);
+      J.chest.add(rbox(0.28, 0.06, 0.18, 0.02, red, 0, 0.44, 0));     // collar
+      // neck + square head: round lamp eyes, grille mouth, ear bolts, antenna bulb
+      J.neck.add(mesh(new THREE.CylinderGeometry(0.04, 0.045, 0.07, 16), dark));
+      J.head.add(rbox(0.22, 0.18, 0.2, 0.03, tin, 0, 0.1, 0));
+      for (const sx of [1, -1]) {
+        J.head.add(disc(0.034, 0.012, black, sx * 0.05, 0.12, 0.1));
+        J.head.add(disc(0.024, 0.016, eye, sx * 0.05, 0.12, 0.104));
+        J.head.add(mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.03, 18), red, sx * 0.118, 0.1, 0).rotateZ(Math.PI / 2));
+        rivet(J.head, sx * 0.09, 0.172, 0.101);
+      }
+      for (let i = -2; i <= 2; i++) J.head.add(rbox(0.008, 0.03, 0.006, 0.002, dark, i * 0.018, 0.05, 0.101));
+      J.head.add(mesh(new THREE.CylinderGeometry(0.005, 0.005, 0.08, 8), dark, 0, 0.23, 0));
+      J.head.add(ball(0.018, alarm, 0, 0.275, 0, 1, 1, 1, 14));
+      for (const [s, sx] of SIDES) {
+        J["shoulder" + s].add(ball(0.065, tin, sx * 0.01, 0.01, 0));
+        J["shoulder" + s].add(mesh(new THREE.TorusGeometry(0.056, 0.01, 8, 24), red, sx * 0.01, 0.01, 0).rotateZ(Math.PI / 2));
+        ribs(J["shoulder" + s], D.upperArm, 0.045, tin);
+        J["elbow" + s].add(ball(0.045, dark));
+        taper(J["elbow" + s], D.foreArm * 0.85, 0.05, 0.042, tin);
+        J["elbow" + s].add(mesh(new THREE.TorusGeometry(0.043, 0.008, 8, 22), red, 0, -D.foreArm * 0.85, 0).rotateX(Math.PI / 2));
+        J["wrist" + s].add(ball(0.032, dark));
+        claw(J, s, sx, D, { shell: tin, joint: dark, tip: red, size: 0.1 });
+        J["hip" + s].add(ball(0.06, dark));
+        ribs(J["hip" + s], D.thigh, 0.058, tin);
+        J["knee" + s].add(ball(0.055, dark));
+        J["knee" + s].add(disc(0.03, 0.012, red, 0, 0, 0.055));
+        J["knee" + s].add(rbox(0.12, D.shin * 0.85, 0.13, 0.025, tin, 0, -D.shin / 2, 0));
+        for (const y of [-0.12, -0.28]) rivet(J["knee" + s], 0, y, 0.066);
+        J["ankle" + s].add(ball(0.04, dark));
+        J["ankle" + s].add(rbox(0.13, 0.065, 0.26, 0.025, tin, 0, -0.045, 0.05));
+        J["ankle" + s].add(rbox(0.134, 0.016, 0.264, 0.006, red, 0, -0.078, 0.05));
       }
     },
   },
