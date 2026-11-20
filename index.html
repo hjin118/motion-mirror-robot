@@ -269,6 +269,7 @@
     <button id="btnClips" type="button" aria-expanded="false" aria-controls="clips">녹화 목록 <span id="clipCount" class="count">0</span></button>
     <button id="btnSettings" type="button" aria-expanded="false" aria-controls="settings">설정</button>
     <a id="btnGame" class="linkbtn" href="./game.html">리듬 게임</a>
+<a id="btnMaker" class="linkbtn" href="./maker.html">로봇 만들기</a>
     <a id="btnHelp" class="linkbtn" href="./guide.html" target="_blank" rel="noopener">도움말</a>
     <span class="spacer"></span>
     <span class="hint">드래그로 시점 회전 · 휠/핀치로 확대</span>
@@ -1259,6 +1260,19 @@ async function startCamera() {
     audio: false,
     video: { facingMode: settings.facing, width: { ideal: 640 }, height: { ideal: 480 } },
   });
+  // the default PC camera can be a screen-sharing "virtual camera" that only shows black: prefer a real webcam
+  const VIRTUAL_CAM = /virtual|eshare|obs|snap ?camera|manycam|xsplit|splitcam|ndi|vcam|e2esoft|mmhmm/i;
+  if (VIRTUAL_CAM.test(stream.getVideoTracks()[0]?.label || "")) {
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    const real = cams.find((c) => !VIRTUAL_CAM.test(c.label));
+    if (real) {
+      stopStream();
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { deviceId: { exact: real.deviceId }, width: { ideal: 640 }, height: { ideal: 480 } },
+      });
+    }
+  }
   video.srcObject = stream;
   await video.play();
   overlay.width = video.videoWidth;
